@@ -51,7 +51,7 @@ function assertUpgraded(dbPath: string): void {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(17) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
+    expect(db.pragma('user_version', { simple: true })).toBe(18) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -114,6 +114,30 @@ PRAGMA user_version=1;
 }
 
 describe('schema upgrade script', () => {
+  it('#1037 v17 旧会话增量升级为空提示，重跑保留提示与原消息', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'suggestion-upgrade-'))
+    const dbPath = path.join(dir, 'panel.db')
+    runDbScript('apply-schema.mjs', dbPath)
+    const db = new Database(dbPath)
+    db.exec(`ALTER TABLE sessions DROP COLUMN suggestionVersion;
+      ALTER TABLE sessions DROP COLUMN nextStepSuggestionJson;
+      ALTER TABLE sessions DROP COLUMN suggestionSourceRunId;
+      INSERT INTO users (id,username,updatedAt) VALUES ('old-user','old-user',CURRENT_TIMESTAMP);
+      INSERT INTO sessions (id,ownerId,containerId,title,updatedAt) VALUES ('old-session','old-user','sandbox','旧会话',CURRENT_TIMESTAMP);
+      INSERT INTO session_messages (id,sessionId,turn,role,content) VALUES ('old-message','old-session',1,'assistant','历史回复');
+      PRAGMA user_version=17;`)
+    db.close()
+    runDbScript('upgrade-schema.mjs', dbPath)
+    const upgraded = new Database(dbPath)
+    expect(upgraded.prepare('SELECT suggestionVersion, nextStepSuggestionJson, suggestionSourceRunId FROM sessions').get()).toEqual({ suggestionVersion: 0, nextStepSuggestionJson: null, suggestionSourceRunId: null })
+    upgraded.prepare('UPDATE sessions SET nextStepSuggestionJson=?').run('{"text":"请继续"}')
+    upgraded.close()
+    runDbScript('upgrade-schema.mjs', dbPath)
+    const again = new Database(dbPath)
+    expect(again.prepare('SELECT nextStepSuggestionJson FROM sessions').get()).toEqual({ nextStepSuggestionJson: '{"text":"请继续"}' })
+    expect(again.prepare('SELECT content FROM session_messages').get()).toEqual({ content: '历史回复' })
+    again.close()
+  })
   it('v16 超星绑定加列保留已有凭证，重复升级不改写清单', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'chaoxing-upgrade-'))
     const dbPath = path.join(dir, 'panel.db')

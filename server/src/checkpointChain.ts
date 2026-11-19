@@ -22,7 +22,7 @@ export function ancestorChainOf(parentOf: (id: string) => string | null, start: 
 // 注入闭包单一来源——滤集若双处手写，一处调整 archivedAt 语义会让归档链与逆放/preview 链
 // 静默分叉）。
 export async function loadCheckpointParentOf(
-  prisma: PrismaClient,
+  prisma: Pick<PrismaClient, 'checkpoint'>,
   sessionId: string,
 ): Promise<Map<string, string | null>> {
   const rows = await prisma.checkpoint.findMany({

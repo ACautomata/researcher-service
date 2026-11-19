@@ -62,7 +62,7 @@
   `session.updated {model, appliesTo:'next-run'}` 同款形状）——列表行/历史投影/summary 事件面
   均携带解析后 `preferredModel`；
   `/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay）+
-  GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读）；`/<id>/abort`、
+  GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读；#1037 增 suggestionVersion 与可空 nextStepSuggestion {text, runId, messageId, version}，正常回复保存后独立生成，保存后复用 session.updated {projectionChanged:true} 重拉；采用仅改本地草稿）；`/<id>/abort`、
   `/<id>/resume`、#783 审批决策 `POST /<id>/approvals/:escalationId`（resolve 面，escalationId
   不存在/已落定 → 50004 同码防探测）；#781 增 `/<id>/rewind`（换 activeCheckpointId 指针重开 + 被放弃路线软删 +
   `session.invalidated{reason:rewind}` 事件）、`/<id>/fork`（新会话复制全件 + 沙箱字面复制 +

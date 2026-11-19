@@ -66,6 +66,8 @@ export interface ChatSessionDeps {
 export type SentAttachment = MediaRef
 
 export interface ChatSession {
+  suggestionText: Ref<string>
+  acceptSuggestion(): void
   chat: ReturnType<typeof useChatStore>
   connecting: Ref<boolean>
   disconnected: Ref<boolean>
@@ -108,6 +110,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   let disposed = false
   const historyBusy = ref(false)
   const projectionReady = ref(false)
+  const nextStepSuggestion = ref<import('@/api/sessions').NextStepSuggestion | null>(null)
   const outboxGenerations = new Map<string, number>()
   function invalidateOutbox(id: string): void {
     outboxGenerations.set(id, (outboxGenerations.get(id) ?? 0) + 1)
@@ -162,6 +165,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     try {
       const p = await getSessionProjection(id)
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
+      const suggestion = p.nextStepSuggestion
+      nextStepSuggestion.value = suggestion && suggestion.version === p.suggestionVersion && p.messages.some(m => m.id === suggestion.messageId && m.role === 'assistant') ? suggestion : null
       chat.setMessages(fromProjection(p))
       chat.setTeams(teamFoldsFromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
@@ -419,6 +424,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
 
   function selectSession(id: string): void {
     if (chat.selectedSession === id) return
+    nextStepSuggestion.value = null
     projectionGen++ // 旧会话迟到响应作废
     projectionReady.value = false
     lastRunError.value = null
@@ -507,6 +513,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.setInput('')
       return true
     }
+    nextStepSuggestion.value = null
+    projectionGen++
     const key = newClientKey()
     pushOptimistic(content, key, attachments)
     chat.setInput('')
@@ -544,12 +552,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     } catch (e) {
       if (disposed || outboxGen !== (outboxGenerations.get(id) ?? 0)) return false
       chat.removeMessage(key)
+      // 明确拒绝不消耗当前提示，重拉权威投影恢复它；网络不确定时仍保持失效。
+      if (e instanceof ApiError && chat.selectedSession === id) void refreshProjection()
       const restoreDraft = () => {
         if (chat.selectedSession === id && chat.input === '') chat.setInput(content)
       }
       if (e instanceof ApiError && (e.code === 50005 || e.code === 50003)) {
         deps.onActionError?.('已有任务在进行中') // 多端门禁：另一端先发了
-        void refreshProjection()
         restoreDraft()
         return false
       }
@@ -730,7 +739,16 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     stream.close()
   }
 
+  const suggestionText = computed(() => projectionReady.value && !connecting.value && !disconnected.value && !running.value && !historyBusy.value && !chat.leaderApprovalPending && !chat.input ? nextStepSuggestion.value?.text ?? '' : '')
+  function acceptSuggestion(): void {
+    if (!suggestionText.value) return
+    chat.setInput(suggestionText.value)
+    onComposerInput()
+  }
+
   return {
+    suggestionText,
+    acceptSuggestion,
     chat,
     connecting,
     disconnected,

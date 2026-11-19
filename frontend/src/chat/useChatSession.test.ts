@@ -882,3 +882,39 @@ describe('#980 会话模型覆盖同步', () => {
     conn.dispose()
   })
 })
+
+
+describe('#1037 下一步提示投影恢复', () => {
+  it('请求被配额拒绝后清空失败草稿，仍可采用当前提示', async () => {
+    const suggestion = { text: '请设计实验', runId: 'r0', messageId: 'm2', version: 1 }
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ suggestionVersion: 1, nextStepSuggestion: suggestion }))
+    const conn = await mounted()
+    vi.mocked(api.sendSessionMessage).mockRejectedValueOnce(new ApiError(200, '配额', 40043))
+    conn.chat.setInput('新请求')
+    conn.send()
+    await flushPromises()
+    conn.chat.setInput('')
+    expect(conn.suggestionText.value).toBe('请设计实验')
+    conn.dispose()
+  })
+  it('完成事件之后的投影变化恢复提示；采用只填草稿，输入清空可重显，无字段清空状态', async () => {
+    const conn = await mounted()
+    const suggestion = { text: '请设计验证实验', runId: 'r0', messageId: 'm2', version: 1 }
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ suggestionVersion: 1, nextStepSuggestion: suggestion }))
+    FakeEventSource.last()!.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('请设计验证实验')
+    expect(conn.chat.input).toBe('')
+    conn.acceptSuggestion()
+    expect(conn.chat.input).toBe('请设计验证实验')
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    expect(conn.suggestionText.value).toBe('')
+    conn.chat.setInput('')
+    expect(conn.suggestionText.value).toBe('请设计验证实验')
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf())
+    FakeEventSource.last()!.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('')
+    conn.dispose()
+  })
+})

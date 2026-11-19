@@ -1,3 +1,4 @@
+import { NextStepSuggestions } from '../../sessions/nextStepSuggestion'
 import { createChaoxingTools, CHAOXING_LEARNING_PROMPT } from '../../chaoxing/tools'
 import type { ChaoxingService } from '../../chaoxing/service'
 import { CHAOXING_COMMAND_TOOLS, chaoxingCommand, formatChaoxingCommandResult, type ChaoxingCommandTarget } from '../../chaoxing/commands'
@@ -120,11 +121,14 @@ import { FilesystemBackend } from 'deepagents'
 // 无可靠 state → null）。生产实现 = SessionService.recordTurn（落 session_messages + 自动标题）；
 // 测试注收集器。setter 注入原因：SessionService 依赖本 service 实例（门禁/命令面），构造顺序
 // 晚于 RunService——constructor 注入会成环。载荷 RecordTurnPayload 单一声明于 sessions/reducer。
-export type RecordTurnFn = (p: RecordTurnPayload) => Promise<void>
+// 返回成功保存的回复 id，供独立下一步提示绑定精确来源；测试收集器可不返回。
+export type RecordTurnFn = (p: RecordTurnPayload) => Promise<string | void>
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
 // 重投可从头重跑，副作用幂等约束在案；重放归一化面见 normalizeReplay）。
 export interface RunCommand {
+  readonly suggestionVersion?: number
+  readonly suggestionUserText?: string
   readonly runId: string
   readonly sessionId: string
   readonly ownerId: string
@@ -362,12 +366,14 @@ export class RunService {
   private readonly writeLocks: WriteLockRegistry
   private readonly overwriteAuditor: OverwriteAuditor
   private attachmentIngestions = new Map<string, { runId: string; tool: ToolLine }>()
+  private readonly nextStepSuggestions: NextStepSuggestions
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
   private queuedDispatch = false
   private dispatch: (cmd: RunCommand, delayMs?: number) => Promise<void> = (cmd) => this.execute(cmd)
 
   constructor(private readonly deps: RunServiceDeps) {
+    this.nextStepSuggestions = new NextStepSuggestions(deps.prisma, deps.hub)
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
     this.approvalTimeoutMs = deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS
     this.clock = deps.clock ?? (() => Date.now())
@@ -392,6 +398,7 @@ export class RunService {
 
   // 停清扫定时器（装配层 close 调用；幂等）
   dispose(): void {
+    this.nextStepSuggestions.dispose()
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer)
       this.sweepTimer = undefined
@@ -1341,6 +1348,7 @@ export class RunService {
       // reducer 内存丢失，断点前内容缺位（blob∪reducer 结构化合并归后续；纯串拼接在
       // interrupted 形态下 blob 与 reducer 前缀重叠必重影，故不做）。后续 resume 的常规
       // 落行同样只含 resume 段，缺口固化。
+      let savedReplyId: string | void = undefined
       if (this.recordTurn && cmd.kind === 'recover' && finalState === 'completed') {
         const anchor = anchorCheckpointId
         if (anchor !== null && !(await this.turnAlreadyRecorded(cmd.sessionId, anchor))) {
@@ -1366,7 +1374,7 @@ export class RunService {
           // status = run 终态语义（completed ⇔ success；interrupted/suspended/aborted/failed →
           // failed——半成品 provenance 明确标 failed，不留成功假象）。interrupted 轮锚恒非空
           // （终态推进先于 interrupt 判定），锚有无不蕴含完成——status 不得由锚推论（R3 修复）。
-          await this.recordTurn({
+          savedReplyId = await this.recordTurn({
             sessionId: cmd.sessionId,
             runId: cmd.runId,
             anchorCheckpointId,
@@ -1409,6 +1417,13 @@ export class RunService {
           // eslint-disable-next-line no-console
           console.warn(`[runner] activeCheckpointId 推进失败: session=${cmd.sessionId}: ${(err as Error).message}`)
         }
+      }
+      if (savedReplyId && finalState === 'completed' && cmd.kind === 'message' && !cmd.operation && !cmd.teammateId && cmd.suggestionVersion !== undefined) {
+        this.nextStepSuggestions.enqueue({
+          ownerId: cmd.ownerId, sessionId: cmd.sessionId, runId: cmd.runId, messageId: savedReplyId,
+          version: cmd.suggestionVersion, userText: cmd.suggestionUserText ?? cmd.content ?? '',
+          answerText: turn.snapshot().content, model, callbacks: [usageHandler],
+        })
       }
       // 治理镜像 dispose（#790）：completed（finish 已推回）/ interrupted / failed / aborted
       // 全路径作废——「中断 = 作废不推回」（AC③），推回后的副本亦无用。

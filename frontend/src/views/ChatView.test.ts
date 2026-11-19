@@ -133,6 +133,25 @@ afterEach(() => {
 })
 
 describe('ChatView（REST+SSE 三件套接线）', () => {
+  it('#1037 晚到投影在真实输入框展示，Tab 采用后可编辑，点击发送才提交', async () => {
+    const w = await mountChat()
+    vi.mocked(api.getSessionProjection).mockResolvedValue({ ...PROJECTION, suggestionVersion: 1,
+      nextStepSuggestion: { text: '请设计验证实验', runId: 'r0', messageId: 'm2', version: 1 } })
+    FakeEventSource.last()!.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    await flushPromises()
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    expect(input.element.value).toBe('')
+    expect(input.attributes('placeholder')).toBe('请设计验证实验')
+    await input.trigger('keydown', { key: 'Tab' })
+    expect(input.element.value).toBe('请设计验证实验')
+    expect(input.element.selectionStart).toBe('请设计验证实验'.length)
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    await input.setValue('请设计一组小规模验证实验')
+    await w.get('[data-test="send"]').trigger('click')
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '请设计一组小规模验证实验', expect.any(String), undefined)
+    w.unmount()
+  })
+
   it('#795 文件采集、数量/大小校验、上传引用、乐观就位状态全链', async () => {
     const w = await mountChat()
     const documents = Array.from({ length: 5 }, (_, i) => new File(['data'], `data-${i}.bin`))

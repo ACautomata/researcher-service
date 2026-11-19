@@ -76,6 +76,11 @@ describe('会话 REST 域（S1，#778）', () => {
   const removedSandboxes: string[] = []
   const cleanupDirs: string[] = []
   let observedModel: ScriptedChatModel | undefined
+  let suggestionGate: Promise<void> | undefined
+  let suggestionText = ''
+  let suggestionError = false
+  const suggestionConfigurations: unknown[] = []
+  const suggestionCalls: Array<{ input: unknown; options: unknown }> = []
   let currentScript: ScriptEntry[]
   let policyTools: readonly string[] | undefined
   let execGate: Promise<void> | undefined
@@ -126,6 +131,31 @@ describe('会话 REST 域（S1，#778）', () => {
       // #881 平台虚拟条目垫底：factory 对平台 baseUrl 不覆盖 observedModel（断言面只看用户端点实例）
       modelFactory: async (_m, opts) => {
         const inst = new ScriptedChatModel(currentScript)
+        const invoke = inst.invoke.bind(inst)
+        inst.invoke = (input, options) => {
+          if (JSON.stringify(input).includes('下一步提示生成器')) suggestionConfigurations.push((options as { configurable?: unknown })?.configurable)
+          return invoke(input, options)
+        }
+        const generate = inst._generate.bind(inst)
+        inst._generate = async (input, options, manager) => {
+          if (JSON.stringify(input).includes('下一步提示生成器')) {
+            suggestionCalls.push({ input, options })
+            const text = suggestionText
+            const signal = (options as { signal?: AbortSignal }).signal
+            await new Promise<void>((resolve, reject) => {
+              const aborted = () => reject(new Error('transport cancelled'))
+              signal?.addEventListener('abort', aborted, { once: true })
+              void (suggestionGate ?? Promise.resolve()).then(() => {
+                signal?.removeEventListener('abort', aborted)
+                resolve()
+              })
+            })
+            if (suggestionError) throw new Error('sensitive provider failure')
+            const message = new AIMessage({ content: text, usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } })
+            return { generations: [{ message, text }] }
+          }
+          return generate(input, options, manager)
+        }
         if (!opts.baseUrl.includes('minimaxi')) observedModel = inst
         return inst
       },
@@ -183,6 +213,11 @@ describe('会话 REST 域（S1，#778）', () => {
 
   afterEach(async () => {
     currentScript = []
+    suggestionGate = undefined
+    suggestionText = ''
+    suggestionError = false
+    suggestionCalls.length = 0
+    suggestionConfigurations.length = 0
     policyTools = undefined
     releaseHeldExec?.()
     execGate = undefined
@@ -197,6 +232,118 @@ describe('会话 REST 域（S1，#778）', () => {
       update: { version: { increment: 1 } },
       create: { id: 1, version: 2 },
     })
+  })
+
+  it('#1037 主回答先完成，延迟建议经认证投影恢复；新请求使旧建议失效', async () => {
+    let release!: () => void
+    suggestionGate = new Promise<void>(resolve => { release = resolve })
+    suggestionText = '请为这个假说设计验证实验'
+    currentScript = [new AIMessage('假说分析完成'), new AIMessage('新的回答')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '建议接缝' })
+    const id = created.body.data.id as string
+    const sent = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(1037)).send({ content: '请分析这个假说' })
+    expect(sent.body.code).toBe(0)
+    const projection = () => request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+    await waitFor(async () => (await projection()).body.data.messages.some((m: { role: string }) => m.role === 'assistant'))
+    expect(runService.stateOf(id)?.state).toBe('completed')
+    expect((await projection()).body.data.nextStepSuggestion).toBeNull()
+    await waitFor(() => suggestionCalls.length === 1)
+    expect(JSON.stringify(suggestionCalls[0].input)).toContain('请分析这个假说')
+    expect(JSON.stringify(suggestionCalls[0].input)).toContain('假说分析完成')
+    expect(suggestionConfigurations).toContainEqual({ maxTokens: 512 })
+    expect(suggestionCalls[0].options).not.toHaveProperty('tools')
+    release()
+    await waitFor(async () => Boolean((await projection()).body.data.nextStepSuggestion))
+    const restored = (await projection()).body.data
+    expect(restored.nextStepSuggestion).toEqual({ text: suggestionText, runId: sent.body.data.runId,
+      messageId: restored.messages.find((m: { role: string }) => m.role === 'assistant').id, version: restored.suggestionVersion })
+    expect(await prisma.llmUsageRecord.count({ where: { runId: sent.body.data.runId, outputTokens: 5 } })).toBe(1)
+    expect(restored.messages.map((m: { content: string }) => m.content)).toEqual(['请分析这个假说', '假说分析完成'])
+    expect(frameEvents(sinkA.frames).some(e => e.type === 'session.updated' && e.sessionId === id)).toBe(true)
+    suggestionText = ''
+    const next = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(1038)).send({ content: '我想研究另一件事' })
+    expect(next.body.code).toBe(0)
+    expect((await projection()).body.data.suggestionVersion).toBe(restored.suggestionVersion + 1)
+    await waitFor(async () => (await projection()).body.data.messages.length === 4)
+    suggestionGate = undefined
+  })
+
+  it('#1037 建议未返回时可接纳新请求，迟到结果不能写入新版本', async () => {
+    let release!: () => void
+    suggestionGate = new Promise<void>(resolve => { release = resolve })
+    suggestionText = '请验证旧假说'
+    currentScript = [new AIMessage('第一轮回答'), new AIMessage('第二轮回答')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '迟到建议' })
+    const id = created.body.data.id as string
+    const projection = () => request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+    await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(2037)).send({ content: '第一个请求' })
+    await waitFor(() => suggestionCalls.length === 1)
+    const next = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(2038)).send({ content: '第二个请求' })
+    expect(next.body.code).toBe(0)
+    await waitFor(async () => (await projection()).body.data.messages.length === 4)
+    suggestionText = ''
+    release()
+    await waitFor(() => suggestionCalls.length === 2)
+    await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 2)
+    expect((await projection()).body.data.nextStepSuggestion).toBeNull()
+    expect((await projection()).body.data.suggestionVersion).toBe(2)
+  })
+
+  it('#1037 10秒总预算向模型传输取消，不影响主回答', async () => {
+    suggestionGate = new Promise<void>(() => {})
+    currentScript = [new AIMessage('已完成的回答')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '超时建议' })
+    const id = created.body.data.id as string
+    await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(3037)).send({ content: '问题' })
+    await waitFor(() => suggestionCalls.length === 1)
+    const signal = (suggestionCalls[0].options as { signal: AbortSignal }).signal
+    expect(signal.aborted).toBe(false)
+    expect(runService.stateOf(id)?.state).toBe('completed')
+    await waitFor(() => signal.aborted, 12_000)
+    const restored = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+    expect(restored.body.data.nextStepSuggestion).toBeNull()
+    expect(restored.body.data.messages.at(-1).content).toBe('已完成的回答')
+  }, 15_000)
+
+  it.each(['', 'x'.repeat(121), '第一行\n第二行', '**请分析**'])('#1037 空或非法结果不显示且主回复保持原文 (%s)', async text => {
+    suggestionText = text
+    currentScript = [new AIMessage('正式答复')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '无建议' })
+    const id = created.body.data.id as string
+    await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(4037)).send({ content: '问题' })
+    await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 1)
+    const projection = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+    expect(projection.body.data.nextStepSuggestion).toBeNull()
+    expect(projection.body.data.messages.at(-1).content).toBe('正式答复')
+  })
+
+  it('#1037 入队失败或请求校验失败不清空已保存提示', async () => {
+    suggestionText = '请补充实验数据'
+    currentScript = [new AIMessage('分析完成')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '接纳失败' })
+    const id = created.body.data.id as string
+    const projection = () => request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+    await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(5037)).send({ content: '请求' })
+    await waitFor(async () => Boolean((await projection()).body.data.nextStepSuggestion))
+    const before = (await projection()).body.data
+    const invalid = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(5038)).send({ content: '' })
+    expect(invalid.body.code).toBe(90002)
+    dispatchFail = true
+    const failed = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(5039)).send({ content: '未能入队的请求' })
+    expect(failed.body.code).not.toBe(0)
+    const after = (await projection()).body.data
+    expect(after.nextStepSuggestion).toEqual(before.nextStepSuggestion)
+    expect(after.suggestionVersion).toBe(before.suggestionVersion)
+    expect(after.messages).toEqual(before.messages)
   })
 
   // ---- 基础 CRUD ----

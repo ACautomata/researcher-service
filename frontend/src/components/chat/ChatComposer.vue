@@ -18,6 +18,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 const props = withDefaults(
   defineProps<{
+    nextStepSuggestion?: string
     modelValue: string
     matches: SlashOption[]
     slashOpen: boolean
@@ -49,6 +50,7 @@ const emit = defineEmits<{
   input: []
   send: []
   keydown: [e: KeyboardEvent]
+  acceptSuggestion: []
   pickSlash: [alias: string]
   addFiles: [files: File[]]
   removeAttachment: [key: number]
@@ -69,6 +71,20 @@ const attachDisabled = computed(
 const sendDisabled = computed(
   () => attachDisabled.value || props.rewindBusy || props.forkBusy,
 )
+
+const visibleSuggestion = computed(() => !props.modelValue && !sendDisabled.value && !props.slashOpen ? props.nextStepSuggestion : '')
+const composing = ref(false)
+async function onKeydown(e: KeyboardEvent): Promise<void> {
+  if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && !composing.value && e.keyCode !== 229 && visibleSuggestion.value) {
+    e.preventDefault()
+    emit('acceptSuggestion')
+    await nextTick()
+    const el = inputEl.value
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length) }
+    return
+  }
+  emit('keydown', e)
+}
 
 // 真实用户输入（非程序化赋值）：上抛 update:modelValue（v-model）+ input（父复位菜单态）
 function onInput(e: Event): void {
@@ -241,17 +257,21 @@ function onSegsKeydown(e: KeyboardEvent): void {
         :value="modelValue"
         data-test="input"
         rows="2"
-        placeholder="发消息…（Enter 发送 / Shift+Enter 换行；输 / 弹命令补全；可粘贴/拖拽/选附件）"
+        :placeholder="visibleSuggestion || '发消息…（Enter 发送 / Shift+Enter 换行；输 / 弹命令补全；可粘贴/拖拽/选附件）'"
+        :class="{ 'has-suggestion': visibleSuggestion }"
         aria-label="消息输入框"
         role="combobox"
         aria-autocomplete="list"
         :aria-expanded="slashOpen"
         :aria-controls="slashOpen ? 'slash-command-menu' : undefined"
         :aria-activedescendant="slashOpen ? `slash-command-${slashIndex}` : undefined"
-        :aria-describedby="argumentHint ? 'slash-argument-hint' : undefined"
+        :aria-describedby="visibleSuggestion ? 'next-step-hint' : argumentHint ? 'slash-argument-hint' : undefined"
         @input="onInput"
-        @keydown="emit('keydown', $event)"
+        @keydown="onKeydown"
+        @compositionstart="composing = true"
+        @compositionend="composing = false"
       ></textarea>
+      <span v-if="visibleSuggestion" id="next-step-hint" class="sr-only">下一步提示：{{ visibleSuggestion }}。按 Tab 采用为可编辑草稿。</span>
       <div class="dock">
         <button
           type="button"
@@ -373,6 +393,8 @@ function onSegsKeydown(e: KeyboardEvent): void {
 /* #980 全内嵌舱：1px 边框 + 12px 圆角、页面底色；focus-within 边框转 primary */
 .pod { display: flex; flex-direction: column; width: 100%; max-width: 840px; margin: 0 auto; border: 1px solid var(--el-border-color); border-radius: 12px; background: var(--el-bg-color); }
 .pod:focus-within { border-color: var(--el-color-primary); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.pod textarea.has-suggestion::placeholder { color: var(--el-text-color-secondary); opacity: 1; }
 .pod textarea { display: block; width: 100%; border: none; outline: none; resize: none; min-height: 52px; max-height: 180px; overflow-y: auto; padding: 8px 10px 4px; background: transparent; box-sizing: border-box; font: inherit; }
 
 /* 舱内底排（左→右）：📎 → 推理强度段控件 → 模型 chip → 圆形发送键 */

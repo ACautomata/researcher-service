@@ -20,7 +20,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { SessionService } from '../src/sessions/service'
 import { createPluginRuntime } from '../src/plugins/surface'
 import { definePlugin, type AnyPluginToolDefinition } from '../src/plugins/api'
-import { ScriptedChatModel } from './runnerFakes'
+import { ScriptedChatModel, isSuggestionInput } from './runnerFakes'
 import { seedUser } from './helpers'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -30,6 +30,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 class CapturingModel extends ScriptedChatModel {
   readonly inputs: string[] = []
   override async _generate(messages: BaseMessage[]) {
+    if (isSuggestionInput(messages)) return { generations: [{ message: new AIMessage(''), text: '' }] }
     const input = messages.find(message => message.getType() === 'human')?.content
     this.inputs.push(typeof input === 'string' ? input : '')
     return { generations: [{ message: new AIMessage({ content: 'ack' }), text: 'ack' }] }

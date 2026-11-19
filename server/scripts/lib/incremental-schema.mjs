@@ -13,8 +13,8 @@
 // 10→11 #786 isTeammate；11→12 #785 file_overwrite_logs；12→13 #790 teammates.kind +
 // #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）；
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
-// minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）。
-export const SCHEMA_VERSION = 17
+// minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）。
+export const SCHEMA_VERSION = 18
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -49,6 +49,12 @@ CREATE INDEX IF NOT EXISTS "chaoxing_authorizations_ownerId_idx" ON "chaoxing_au
   }
   if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'learningCourseId')) {
     db.exec('ALTER TABLE "sessions" ADD COLUMN "learningCourseId" TEXT')
+  }
+  if (hasSessions) {
+    const columns = db.prepare('PRAGMA table_info("sessions")').all()
+    if (!columns.some(c => c.name === 'suggestionSourceRunId')) db.exec('ALTER TABLE "sessions" ADD COLUMN "suggestionSourceRunId" TEXT')
+    if (!columns.some(c => c.name === 'suggestionVersion')) db.exec('ALTER TABLE "sessions" ADD COLUMN "suggestionVersion" INTEGER NOT NULL DEFAULT 0')
+    if (!columns.some(c => c.name === 'nextStepSuggestionJson')) db.exec('ALTER TABLE "sessions" ADD COLUMN "nextStepSuggestionJson" TEXT')
   }
   // #782（#747·12）：sessions 水位列（files rewind 的 planRevert 判定下界——scope=chat 保持
   // 现状永久化面）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 preferredModelJson 模式）。
@@ -207,6 +213,9 @@ CREATE TABLE IF NOT EXISTS "sessions" (
     "parentSessionKey" TEXT,
     "forkSourceJson" TEXT,
     "activeCheckpointId" TEXT,
+    "suggestionVersion" INTEGER NOT NULL DEFAULT 0,
+    "nextStepSuggestionJson" TEXT,
+    "suggestionSourceRunId" TEXT,
     "preferredModelJson" TEXT,
     "fileJournalAnchorSeq" INTEGER,
     "archivedAt" DATETIME,
