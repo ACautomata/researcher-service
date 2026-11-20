@@ -332,6 +332,45 @@ CREATE TABLE "chaoxing_authorizations" (
 );
 
 -- CreateTable
+CREATE TABLE "skill_packages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "description" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "uploaderId" TEXT NOT NULL,
+    "uploaderRole" TEXT NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'published',
+    "publishedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "skill_packages_uploaderId_fkey" FOREIGN KEY ("uploaderId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "skill_files" (
+    "packageId" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "mime" TEXT NOT NULL,
+    "size" INTEGER NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "content" BLOB NOT NULL,
+
+    PRIMARY KEY ("packageId", "path"),
+    CONSTRAINT "skill_files_packageId_fkey" FOREIGN KEY ("packageId") REFERENCES "skill_packages" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "skill_enablements" (
+    "ownerId" TEXT NOT NULL,
+    "skillId" TEXT NOT NULL,
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "enabledAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY ("ownerId", "skillId"),
+    CONSTRAINT "skill_enablements_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
 CREATE TABLE "background_execs" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "sessionId" TEXT NOT NULL,
@@ -470,7 +509,20 @@ CREATE INDEX "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("creat
 CREATE INDEX "chaoxing_authorizations_ownerId_idx" ON "chaoxing_authorizations"("ownerId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "skill_packages_name_key" ON "skill_packages"("name");
+
+-- CreateIndex
+CREATE INDEX "skill_packages_category_idx" ON "skill_packages"("category");
+
+-- CreateIndex
+CREATE INDEX "skill_packages_uploaderId_idx" ON "skill_packages"("uploaderId");
+
+-- CreateIndex
+CREATE INDEX "skill_enablements_skillId_idx" ON "skill_enablements"("skillId");
+
+-- CreateIndex
 CREATE INDEX "background_execs_sessionId_createdAt_idx" ON "background_execs"("sessionId", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "background_execs_state_delivery_idx" ON "background_execs"("state", "delivery");
+
