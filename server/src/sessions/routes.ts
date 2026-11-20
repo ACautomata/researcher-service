@@ -21,9 +21,12 @@ import {
 } from '../validation/schemas'
 import { MESSAGE_KEY_REGEX } from './values'
 import type { SessionService } from './service'
+import type { BackgroundExecService } from '../runner/background/service'
+import { backgroundCancelSchema, backgroundOutputQuerySchema } from '../validation/schemas'
 
 export interface SessionsRouterDeps {
   readonly service: SessionService
+  readonly background?: BackgroundExecService
 }
 
 // Idempotency-Key：32-hex 钉死形态（#747 C 节）。缺失/格式非法 → 90002（确定性拒绝，
@@ -46,6 +49,24 @@ function pathId(req: Request): string {
 export function createSessionsRouter(deps: SessionsRouterDeps): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
+
+  // Routes are always declared so OpenAPI reflection has the same shape in tests.
+  const background = () => {
+    if (!deps.background) throw fail(CODE.ROUTE_NOT_FOUND)
+    return deps.background
+  }
+  router.get('/:id/background-tasks', async (req, res) => {
+    ok(res, await background().list(req.user!.id, pathId(req)))
+  })
+  router.get('/:id/background-tasks/:taskId', async (req, res) => {
+    const parsed = backgroundOutputQuerySchema.safeParse(req.query)
+    if (!parsed.success) throw fail(CODE.VALIDATION_FAILED)
+    ok(res, await background().output(req.user!.id, pathId(req), String(req.params.taskId), parsed.data.offset, parsed.data.limit))
+  })
+  router.post('/:id/background-tasks/:taskId/cancel', validateBody(backgroundCancelSchema), async (req, res) => {
+    await background().cancel(req.user!.id, pathId(req), String(req.params.taskId))
+    ok(res, null)
+  })
 
   // POST / —— 创建会话（扁平挂本人；标题可选）+ session.created{source:new} 广播。
   router.post('/', validateBody(sessionCreateSchema), async (req: Request, res: Response) => {

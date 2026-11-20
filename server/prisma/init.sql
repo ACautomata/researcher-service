@@ -331,6 +331,33 @@ CREATE TABLE "chaoxing_authorizations" (
     CONSTRAINT "chaoxing_authorizations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "background_execs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "toolCallId" TEXT NOT NULL,
+    "command" TEXT NOT NULL,
+    "container" TEXT NOT NULL,
+    "runCommandJson" TEXT NOT NULL,
+    "loopState" TEXT,
+    "state" TEXT NOT NULL DEFAULT 'starting',
+    "background" BOOLEAN NOT NULL DEFAULT false,
+    "delivery" TEXT NOT NULL DEFAULT 'pending',
+    "stdout" TEXT NOT NULL DEFAULT '',
+    "stderr" TEXT NOT NULL DEFAULT '',
+    "truncated" BOOLEAN NOT NULL DEFAULT false,
+    "exitCode" INTEGER,
+    "hardTimeoutMs" INTEGER NOT NULL,
+    "logBytes" INTEGER NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "finishedAt" DATETIME,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "background_execs_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
@@ -441,3 +468,9 @@ CREATE INDEX "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("creat
 
 -- CreateIndex
 CREATE INDEX "chaoxing_authorizations_ownerId_idx" ON "chaoxing_authorizations"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "background_execs_sessionId_createdAt_idx" ON "background_execs"("sessionId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "background_execs_state_delivery_idx" ON "background_execs"("state", "delivery");

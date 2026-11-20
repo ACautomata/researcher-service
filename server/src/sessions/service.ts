@@ -1,3 +1,4 @@
+import type { BackgroundExecService } from '../runner/background/service'
 import { parseSlash, BUILTIN_COMMANDS } from '../plugins/slash'
 import { chaoxingCommand, parseChaoxingCommandArgs } from '../chaoxing/commands'
 import type { ModelRef } from '../runner/providerRegistry'
@@ -149,6 +150,7 @@ export interface SessionRunGateway {
 export type RunDispatcher = (cmd: RunCommand) => Promise<void>
 
 export interface SessionServiceDeps {
+  readonly background?: BackgroundExecService
   readonly prisma: PrismaClient
   readonly hub: EventPublisher
   readonly runService: SessionRunGateway
@@ -429,6 +431,10 @@ export class SessionService {
         throw fail(CODE.RUN_IN_PROGRESS)
       }
     }
+    await this.deps.background?.cancel(session.ownerId, sessionId)
+    // A completion may have queued a continuation while cancellation awaited Docker.
+    this.requireTerminal(sessionId)
+    for (const teammate of teammates) this.requireTerminal(teammate.threadId)
     await this.deps.sandboxes?.remove(sessionId)
     await this.deps.prisma.$transaction(async (tx) => {
       const teammateThreads = await tx.teammate.findMany({
@@ -686,12 +692,26 @@ export class SessionService {
   // ---- 中断（story 8，by:user）。仅 running 在飞 run 可中断（RunService.abort 只对 aborts
   // 条目生效——queued/interrupted/终态 → 50006）。run.aborted{by:user} 事件由 RunService 发。----
   async abortRun(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<{ runId: string }> {
-    await getSessionForUser(this.deps.prisma, user, sessionId)
+    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
     const snap = this.deps.runService.stateOf(sessionId)
-    if (snap?.state !== 'running' || !this.deps.runService.abort(snap.runId, 'user')) {
+    let aborted = snap?.state === 'running' && this.deps.runService.abort(snap.runId, 'user')
+    let abortRunId = snap?.runId
+    const tasks = await this.deps.background?.list(session.ownerId, sessionId)
+    const hadTasks = tasks?.some(t => ['starting', 'running'].includes(t.state))
+    // Stop child loops before cancelling their processes, so no delayed approved tool can launch.
+    const children = await this.deps.prisma.teammate.findMany({ where: { parentSessionId: sessionId } })
+    for (const child of children) {
+      const run = this.deps.runService.stateOf(child.threadId)
+      if (run?.state === 'running') {
+        aborted = this.deps.runService.abort(run.runId, 'user') || aborted
+        abortRunId ??= run.runId
+      }
+    }
+    await this.deps.background?.cancel(session.ownerId, sessionId)
+    if (!aborted && !hadTasks) {
       throw fail(CODE.RUN_NOT_ABORTABLE)
     }
-    return { runId: snap.runId }
+    return { runId: abortRunId ?? tasks![0]!.runId }
   }
 
   // ---- resume（interrupt 全端可审批面；#783 审批漏斗接 decisions 构造，本票机制面直通）。
@@ -920,6 +940,8 @@ export class SessionService {
       this.requireTerminal(sessionId)
       const rows = await this.listHistoryRows(sessionId)
       const { anchor, parentOf } = await this.anchorForRewind(sessionId, rows, p.messageId)
+      await this.deps.background?.cancel(session.ownerId, sessionId)
+      this.requireTerminal(sessionId)
       const anchorChain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
 
       // 被放弃 checkpoint（未归档全体 − 锚点链）——共享前缀（锚点之前）一律不打标记。
@@ -1092,6 +1114,10 @@ export class SessionService {
   ): Promise<{ session: SessionSummary }> {
     const session = await getSessionForUser(this.deps.prisma, user, sessionId)
     this.requireTerminal(sessionId)
+
+    if (this.deps.background && await this.deps.prisma.backgroundExec.count({ where: { sessionId, state: { in: ['starting', 'running'] } } })) {
+      throw fail(CODE.RUN_IN_PROGRESS, '后台任务仍在写入沙箱，请等待完成或取消后再分叉')
+    }
 
     // 切点解析：缺省 = 当前活跃头（指针或最新锚点；皆无 = 空会话 fork，纯新会话 + 沙箱复制）
     const rows = await this.listHistoryRows(sessionId)

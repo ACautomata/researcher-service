@@ -1,3 +1,4 @@
+import { backgroundCancelSchema, backgroundOutputQuerySchema } from '../validation/schemas'
 // 端点全集声明（#761）：每个 REST 端点一条 spec，经 register() 展开为 registry.registerPath。
 //
 // 漂移防线：
@@ -722,3 +723,7 @@ for (const endpoint of [
   { method: 'put' as const, suffix: '/sessions/{id}/scope', summary: '限定或解除会话课程范围', body: chaoxingScopeSchema },
   { method: 'post' as const, suffix: '/learn', summary: '按学习话题检索只读资源', body: chaoxingLearnSchema },
 ]) register({ ...endpoint, path: `/api/v1/integrations/chaoxing${endpoint.suffix}`, tag: '超星学习', auth: 'user', errors: '10001/10005 认证与改密门；90001 未配置；90002 校验失败；90003 需要重新绑定或远端能力不可用；50002 会话不存在或不归本人。' })
+
+register({ method: 'get', path: '/api/v1/sessions/{id}/background-tasks', tag: 'Sessions', summary: '当前会话及 teammate 后台任务', auth: 'user', errors: '50002 session_not_found', dataNote: '任务元数据，不包含日志正文' })
+register({ method: 'get', path: '/api/v1/sessions/{id}/background-tasks/{taskId}', tag: 'Sessions', summary: '查询后台任务状态和分页输出', auth: 'user', query: backgroundOutputQuerySchema, errors: '50002 session_not_found; 90002 validation' })
+register({ method: 'post', path: '/api/v1/sessions/{id}/background-tasks/{taskId}/cancel', tag: 'Sessions', summary: '取消后台任务并禁止自动注入', auth: 'user', body: backgroundCancelSchema, nullData: true, errors: '50002 session_not_found; 90002 validation' })

@@ -23,6 +23,11 @@ vi.mock('@/api/sessions', () => ({
   uploadSessionAttachment: vi.fn(),
   setSessionPreferredModel: vi.fn(),
 }))
+vi.mock('@/api/backgroundTasks', () => ({
+  listBackgroundTasks: vi.fn(async () => []),
+  getBackgroundOutput: vi.fn(),
+  cancelBackgroundTask: vi.fn(),
+}))
 vi.mock('@/api/models', () => ({
   listAvailableModels: vi.fn(),
 }))

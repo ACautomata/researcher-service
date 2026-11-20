@@ -83,7 +83,7 @@ export class BullMqRunQueue {
   // settle 反而架空 addTimeoutMs（永挂场景下 submit 永不返回）。对齐 fleet raceAddTimeout。
   async submit(cmd: RunCommand, opts: { delayMs?: number } = {}): Promise<void> {
     const add = this.queue.add('run', cmd, {
-      jobId: cmd.runId,
+      jobId: cmd.backgroundRecoveryTaskId ? `background-recover-${cmd.backgroundRecoveryTaskId}` : cmd.runId,
       attempts: 1,
       ...(opts.delayMs && opts.delayMs > 0 ? { delay: opts.delayMs } : {}),
     })

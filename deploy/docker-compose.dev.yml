@@ -45,6 +45,8 @@ services:
       # 与 prod 逐一对齐，仅 NODE_ENV 不同。config.ts 唯一 env 读取处（server/src/config.ts）。
       NODE_ENV: development
       PORT: "8001"
+      EXEC_FOREGROUND_MS: ${EXEC_FOREGROUND_MS:-600000}
+      EXEC_HARD_TIMEOUT_MS: ${EXEC_HARD_TIMEOUT_MS:-86400000}
       REDIS_URL: redis://redis:6379/0
       # SQLite 持久化：dev 独立 named volume 挂载点（与 prod panel-db 隔离）。
       DATABASE_URL: file:/app/db/db.sqlite3

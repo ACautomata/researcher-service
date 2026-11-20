@@ -257,3 +257,10 @@ export const nextStepSuggestionSchema = z.object({
   version: z.number().int().nonnegative(),
 })
 export type NextStepSuggestion = z.infer<typeof nextStepSuggestionSchema>
+
+// Background output offsets are UTF-16 character offsets, independently applied to both streams.
+export const backgroundOutputQuerySchema = z.object({
+  offset: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+  limit: z.coerce.number().int().min(1).max(16384).default(16384),
+})
+export const backgroundCancelSchema = z.object({}).strict()

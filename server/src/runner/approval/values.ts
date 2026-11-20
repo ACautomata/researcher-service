@@ -1,3 +1,4 @@
+import { EXEC_QUERY_TOOL } from '../background/values'
 // 审批三层漏斗常量（#783 · 729 规格 / ADR 0015）。单一来源：护栏数字、工具类别映射表、
 // 路径前缀集、升级来源枚举、judge 政策文本（版本化 markdown）。供 rules（规则层）、judge、
 // funnel（中间件）、runService（状态机）与测试复用。
@@ -60,6 +61,7 @@ export const APPROVAL_REJECTION_CONTENT_PREFIX = '操作被拒绝：'
 //     fs 写工具（已被本白名单覆盖）；其自身无路径参数。首验倾向 = 实施时同归文件类（无路径
 //     参数 → 规则层放行），通道③落地票按实际参数面复核——此处记录为该票的输入，不再悬置。
 export const FILE_TOOLS: readonly string[] = [
+  EXEC_QUERY_TOOL,
   'ls',
   'read_file',
   'write_file',

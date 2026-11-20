@@ -88,6 +88,7 @@ async function main(): Promise<void> {
     prisma,
     hub: eventHub,
     runService: runner.service,
+    background: runner.background,
     dispatch: (cmd) => runner.queue.submit(cmd),
     plugins: runner.plugins,
     chaoxing: { status: (ownerId) => chaoxing.status(ownerId) },
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     },
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))
+  runner.background.start(tasks => runner.service.wakeBackground(tasks))
   // wiki 全量更新独立 run（#790 · 三通道③）：复用 runner 装配的 registry/primitives（#731
   // 单出口纪律）+ 事件经同一 StreamHub 扇出 wiki_run.* 五类事件；全局串行锁/在飞互斥在服务内。
   const wikiUpdateRuns = new WikiUpdateRunService({
@@ -159,7 +161,7 @@ async function main(): Promise<void> {
     // 心跳 20s 用缺省（HEARTBEAT_MS，路由层唯一默认值声明处）。
     events: { hub: eventHub },
     // sessions（#778）：会话 REST 域（/api/v1/sessions）。SessionService 单例注入。
-    sessions: { service: sessions },
+    sessions: { service: sessions, background: runner.background },
     // attachments（#780）：上传/下载 REST（挂 /api/v1）。AttachmentsService 单例注入。
     attachments: { service: attachmentsService, tmpRoot: attachmentTmpRoot },
     // plugins（#788）：目录 + 启用位（/api/v1/plugins，8xxxx 段）。编译期目录注入。

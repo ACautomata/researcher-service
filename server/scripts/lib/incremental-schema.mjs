@@ -14,9 +14,41 @@
 // #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）；
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
 // minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）。
-export const SCHEMA_VERSION = 18
+export const SCHEMA_VERSION = 19
 
 export function runIncrementalSchema(db) {
+  db.exec(`
+-- CreateTable
+CREATE TABLE IF NOT EXISTS "background_execs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "toolCallId" TEXT NOT NULL,
+    "command" TEXT NOT NULL,
+    "container" TEXT NOT NULL,
+    "runCommandJson" TEXT NOT NULL,
+    "loopState" TEXT,
+    "state" TEXT NOT NULL DEFAULT 'starting',
+    "background" BOOLEAN NOT NULL DEFAULT false,
+    "delivery" TEXT NOT NULL DEFAULT 'pending',
+    "stdout" TEXT NOT NULL DEFAULT '',
+    "stderr" TEXT NOT NULL DEFAULT '',
+    "truncated" BOOLEAN NOT NULL DEFAULT false,
+    "exitCode" INTEGER,
+    "hardTimeoutMs" INTEGER NOT NULL,
+    "logBytes" INTEGER NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "finishedAt" DATETIME,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "background_execs_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "background_execs_sessionId_createdAt_idx" ON "background_execs"("sessionId", "createdAt");
+-- CreateIndex
+CREATE INDEX IF NOT EXISTS "background_execs_state_delivery_idx" ON "background_execs"("state", "delivery");
+  `)
   db.exec(`
 CREATE TABLE IF NOT EXISTS "chaoxing_bindings" (
     "ownerId" TEXT NOT NULL PRIMARY KEY,
