@@ -70,12 +70,18 @@ export interface LeaderAgentParams {
   // 系统 prompt 插件段（promptSnippet + guidelines；空集 = 空串不进拼接）。teammate
   // subagent 同步继承（#742 story 47「teammate 默认全继承」的插件维度）。
   readonly pluginPrompt?: string
+  // 系统 prompt skill 段（#1057 C 票，#1054 D4）：启用 skill 目录快照（≤4KB 单行目录）。
+  // 空 = 空串不进拼接；teammate subagent 同步继承（同 pluginPrompt 先例）；wiki-update
+  // 治理 teammate 不接（runService 构建面不传）。
+  readonly skillPrompt?: string
+  // read_skill 渐进披露工具（per-run 启用集快照闭包；空集不传）。
+  readonly skillTools?: NonNullable<CreateDeepAgentParams['tools']>
 }
 
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
 // (threadId, 拓扑因子) 缓存实例，版本变更丢缓存重建，见 runService.ts）。
 export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
-  const subagentExtras = joinSections(params.pluginPrompt)
+  const subagentExtras = joinSections(params.pluginPrompt, params.skillPrompt)
   return createDeepAgent({
     // deepagents model 参数类型面只收 BaseLanguageModel；withFallbacks 产物
     // （RunnableBinding）运行时具备完整调用面（invoke/stream/bindTools 全委派），类型面
@@ -83,8 +89,8 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt),
-    ...(params.pluginPrompt
+    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt, params.skillPrompt),
+    ...(params.pluginPrompt || params.skillPrompt
       ? {
           subagents: [{
             ...GENERAL_PURPOSE_SUBAGENT,
@@ -96,6 +102,7 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     tools: [
       ...(params.tools ?? []),
       ...(params.pluginTools ?? []),
+      ...(params.skillTools ?? []),
     ],
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }

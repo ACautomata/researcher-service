@@ -11,6 +11,7 @@ import { preferredModelSchema } from '../../validation/schemas'
 import { resolveModelRef, type ModelRef, type PreferredModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
+import { buildSkillCatalogPrompt, createSkillReadTool, loadSkillCatalog } from '../../skills/runner'
 import type { PluginRuntime } from '../../plugins/surface'
 import { toLangChainTools, contentToText } from '../../plugins/tools'
 import type { AnyPluginToolDefinition } from '../../plugins/api'
@@ -317,6 +318,10 @@ interface GraphBuildContext {
   readonly journalSessionId: string
   readonly pluginToolDefs: readonly AnyPluginToolDefinition[]
   readonly pluginPrompt: string
+  // Skill 市场面（#1057 C 票）：目录版本（缓存键）+ prompt 段 + read_skill 工具。
+  readonly skillCatalogVersion: string
+  readonly skillPrompt: string
+  readonly skillTools: NonNullable<LeaderAgentParams['tools']>
 }
 
 export class RunService {
@@ -945,6 +950,16 @@ export class RunService {
     //（治理通道计划自拟 + 生命周期工具面，与「治理通道自我防护」同口径；且其图跳缓存
     // per-run 重建，插件目录版本入键的失效面不适用）。
     const pluginSurface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
+    // Skill 市场运行时面（#1057 C 票，#1054 D4）：启用 skill 目录快照（prompt 注入 + 图缓存
+    // 版本因子）+ read_skill 渐进披露工具。per-run 快照语义（与 capabilities 同源）——启用/
+    // 目录变更 → 图重建；wiki-update 治理 run 不接（同插件纪律，下方治理分支不传）。
+    const skillCatalog = capabilities.enabledSkillIds.length > 0
+      ? await loadSkillCatalog(this.deps.prisma, capabilities.enabledSkillIds)
+      : undefined
+    const skillPrompt = skillCatalog ? buildSkillCatalogPrompt(skillCatalog.entries) : ''
+    const skillTools = skillCatalog !== undefined && skillCatalog.entries.length > 0
+      ? [createSkillReadTool({ prisma: this.deps.prisma, enabledSkillIds: capabilities.enabledSkillIds })]
+      : []
     const agent = wikiUpdate && wikiMirror
       ? this.buildWikiUpdateAgent({
           threadId: cmd.sessionId,
@@ -974,6 +989,9 @@ export class RunService {
           journalSessionId: sandboxSessionId,
           pluginToolDefs: pluginSurface?.tools ?? [],
           pluginPrompt: pluginSurface?.prompt ?? '',
+          skillCatalogVersion: skillCatalog?.version ?? '',
+          skillPrompt,
+          skillTools,
         })
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
@@ -2095,14 +2113,16 @@ export class RunService {
 
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
   private getOrBuildGraph(ctx: GraphBuildContext): DeepAgentLike {
-    const { threadId, configVersion, policy, model, ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, journalSessionId, pluginToolDefs, pluginPrompt } = ctx
+    const { threadId, configVersion, policy, model, ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, journalSessionId, pluginToolDefs, pluginPrompt, skillCatalogVersion, skillPrompt, skillTools } = ctx
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
     // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
     // 插件目录版本入键（#788）：启用集（capabilities.key）管「哪些插件开」，目录版本管
     // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}`
+    // skill 目录版本入键（#1057）：启用集已在 capabilities.key（enabledSkillIds 并入），
+    // 版本管「开着的 skill 长什么样」（id/name/sha256 稳定序 sha256）。
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     // #782 × #785 接缝：journaling 开启时 backendFor 产出打点装饰器（其 apply 经 putBuffer
@@ -2136,7 +2156,7 @@ export class RunService {
       checkpointer: this.deps.saver,
       systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, this.deps.chaoxing ? CHAOXING_LEARNING_PROMPT : undefined),
       interruptPolicy: policy,
-      tools: [...wikiTools, ...tools, ...(this.deps.background?.tools(ownerId, sandboxSessionId) ?? []), ...(this.deps.chaoxing ? createChaoxingTools(this.deps.chaoxing, ownerId) : [])],
+      tools: [...wikiTools, ...tools, ...(this.deps.background?.tools(ownerId, sandboxSessionId) ?? []), ...(this.deps.chaoxing ? createChaoxingTools(this.deps.chaoxing, ownerId) : []), ...skillTools],
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins
@@ -2151,6 +2171,9 @@ export class RunService {
           }
         : {}),
       ...(pluginPrompt !== '' ? { pluginPrompt } : {}),
+      // skill 目录段（#1057）：leader system prompt + general-purpose subagent 继承
+      //（graphFactory joinSections 拼接；空集不入拼接）。
+      ...(skillPrompt !== '' ? { skillPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键，见 runtimeMiddleware()）。
       ...(middleware.length > 0 ? { middleware } : {}),
     })
