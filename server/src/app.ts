@@ -16,6 +16,7 @@ import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
 import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachments/routes'
+import { createSkillsRouter, type SkillsRouterDeps } from './skills/routes'
 import { createPluginsRouter, type PluginsRouterDeps } from './plugins/routes'
 import { envelopeErrorHandler, notFound } from './middleware/errorHandler'
 import './types' // Express Request 增强（req.user / req.prisma）
@@ -48,13 +49,17 @@ export interface AppDeps {
   // plugins 接缝（#788，#752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。注入即挂载
   //（条件挂载先例）——生产 server.ts 注入编译期目录 PLUGIN_MANIFESTS；缺省 = 不挂。
   plugins?: PluginsRouterDeps
+  // skills 接缝（#1056，#1054 D1/D5）：Skill 市场 REST（/api/v1/skills——上传/列表/详情/
+  // 下载/删除/启用位，8xxxx 续号段）。注入即挂载（条件挂载先例）——生产 server.ts 装配
+  // SkillMarketService；缺省 = 不挂（/api/v1/skills → 90005）。
+  skills?: SkillsRouterDeps
   // models 试连带（#882 端点试连）：模型工厂/超时预算注入缝——测试注入 fake 工厂覆盖
   // 成功/失败两态；生产缺省 = initChatModel 真工厂 + 10s 超时（server.ts 不注入）。
   models?: ModelsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models, chaoxing }: AppDeps): Application {
+export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, skills, models, chaoxing }: AppDeps): Application {
   const app = express()
   // wiki 5mb json 特例已随写面整域退役删除（#758 Q3——codex PR#346 的大 body 契约随
   // PUT/POST/DELETE /wiki/page 下线失效）：现存读面 GET 无 body，POST /wiki/update 触发面
@@ -121,6 +126,10 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   // plugins（#788）：目录 + 启用位（/api/v1/plugins，8xxxx 段）。存在即挂载（条件挂载先例）。
   if (plugins) {
     app.use('/api/v1/plugins', createPluginsRouter(plugins))
+  }
+  // skills（#1056）：Skill 市场全件（/api/v1/skills）。存在即挂载（条件挂载先例）。
+  if (skills) {
+    app.use('/api/v1/skills', createSkillsRouter(skills))
   }
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）

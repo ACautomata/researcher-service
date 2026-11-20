@@ -210,6 +210,12 @@ export const pluginEnablementSchema = z.object({
   enabled: z.boolean(),
 })
 
+// #1056 Skill 市场：启用位（与 pluginEnablementSchema 同形状；语义校验归 skills/service——
+// schema 只锁形状，#1054 D4 启用模型独立于插件）。
+export const skillEnablementSchema = z.object({
+  enabled: z.boolean(),
+})
+
 export const pluginCommandCompletionQuerySchema = z.object({
   prefix: z.string().max(1000).default(''),
 })
