@@ -272,6 +272,11 @@ jobs:
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,GHCR_FALLBACK_USER,GHCR_FALLBACK_TOKEN
+          # 2026-11-20 #1055 部署事故（CD run #358 attempt 1-3）：#1060 给 server 新增 adm-zip 依赖后，
+          # 宿主首次需整层拉取 ~200MB 级 node_modules 层，宿主→GHCR blob 链路阵发 EOF；重试期间
+          # ssh-action 默认 10m command_timeout 两次 Run Command Timeout 腰斩下载中段（当时层以
+          # ~2.4MB/s 稳定流速）。放宽到 30m，给下方 pull 重试留足预算。
+          command_timeout: 30m
           script: |
             set -euo pipefail
 
@@ -303,13 +308,15 @@ jobs:
             # 真缺镜像时 up -d 会自行补拉。
             # 重试吃掉 registry 瞬时抖动，但不加 --ignore-pull-failures——那会静默部署旧镜像。
             pull_ok=0
-            for attempt in 1 2 3; do
+            # 2026-11-20 #1055 部署事故：EOF 阵发且 Docker 层下载无断点续传，失败即整层重来；
+            # 3×10s 预算不足 → 6 次重试、20s 间隔（链路通畅时单次整层 ~80s 可完成）。
+            for attempt in 1 2 3 4 5 6; do
               if docker compose -f docker-compose.deploy.yml pull frontend server searxng; then
                 pull_ok=1
                 break
               fi
-              echo "[deploy] pull attempt $attempt failed, retrying in 10s ..." >&2
-              sleep 10
+              echo "[deploy] pull attempt $attempt failed, retrying in 20s ..." >&2
+              sleep 20
             done
             if [ "$pull_ok" != "1" ]; then
               echo "[deploy] ERROR: image pull failed after 3 attempts" >&2
