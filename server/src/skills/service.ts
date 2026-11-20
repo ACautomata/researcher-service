@@ -24,6 +24,9 @@ export interface SkillMarketItem {
   readonly uploaderName: string
   readonly fileCount: number
   readonly publishedAt: string
+  // 请求者维度启用位（#1058 D 票开关初始态）：市场「发布」≠ 本人「启用」——列表/详情都
+  // 带当前用户的 per-user 位（未启用缺省 false），前端开关据此渲染。
+  readonly enabled: boolean
 }
 
 export interface SkillPackageDetail extends SkillMarketItem {
@@ -87,7 +90,7 @@ export class SkillMarketService {
   }
 
   // ---- 市场列表：published 包，按类别 + 名称/描述子串筛选（D5 中心筛选面）----
-  async listPackages(p: { category?: string; q?: string }): Promise<SkillMarketItem[]> {
+  async listPackages(p: { category?: string; q?: string; viewerId: string }): Promise<SkillMarketItem[]> {
     const rows = await this.deps.prisma.skillPackage.findMany({
       where: {
         status: 'published',
@@ -106,6 +109,12 @@ export class SkillMarketService {
       select: { id: true, username: true },
     })
     const nameById = new Map(users.map((u) => [u.id, u.username]))
+    // 请求者启用位批量预取（无 relation，按 ownerId 直查 enabled 行）——前端开关初始态
+    const enabledRows = await this.deps.prisma.skillEnablement.findMany({
+      where: { ownerId: p.viewerId, enabled: true },
+      select: { skillId: true },
+    })
+    const enabledSet = new Set(enabledRows.map((r) => r.skillId))
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
@@ -114,11 +123,12 @@ export class SkillMarketService {
       uploaderName: nameById.get(r.uploaderId) ?? '',
       fileCount: r.files.length,
       publishedAt: r.publishedAt.toISOString(),
+      enabled: enabledSet.has(r.id),
     }))
   }
 
   // ---- 详情：文件清单 + 元数据（市场全员可见；不存在 → 80041 同码防探测）----
-  async getPackage(skillId: string): Promise<SkillPackageDetail> {
+  async getPackage(skillId: string, viewerId: string): Promise<SkillPackageDetail> {
     const row = await this.deps.prisma.skillPackage.findUnique({
       where: { id: skillId },
       include: { files: { select: { path: true, mime: true, size: true } }, },
@@ -128,6 +138,10 @@ export class SkillMarketService {
       where: { id: row.uploaderId },
       select: { username: true },
     })
+    const enablement = await this.deps.prisma.skillEnablement.findUnique({
+      where: { ownerId_skillId: { ownerId: viewerId, skillId } },
+      select: { enabled: true },
+    })
     return {
       id: row.id,
       name: row.name,
@@ -136,6 +150,7 @@ export class SkillMarketService {
       uploaderName: uploader?.username ?? '',
       fileCount: row.files.length,
       publishedAt: row.publishedAt.toISOString(),
+      enabled: enablement?.enabled === true,
       files: [...row.files].sort((a, b) => a.path.localeCompare(b.path)),
     }
   }

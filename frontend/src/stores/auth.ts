@@ -68,6 +68,9 @@ export const useAuthStore = defineStore('auth', {
     // role 驱动 admin-only nav 条件渲染 + requiresAdmin 路由守卫；mustChangePassword 驱动强制
     // 改密流程。login/register 后拉一次，me 失败静默降级（token 已就绪，守卫靠 refreshExhausted）。
     role: '' as string,
+    // #1058 D 票：me 的 username 记录（Skill 市场删除按钮「作者本人」判定依据）——
+    // me 失败静默降级时保持空串，删除入口不渲染（fail-safe）。
+    username: '' as string,
     mustChangePassword: false as boolean,
     maxContainers: 0 as number,
   }),
@@ -93,6 +96,7 @@ export const useAuthStore = defineStore('auth', {
         if (!resp.ok) return
         const data = env ? (env.data as Record<string, unknown>) : (body as Record<string, unknown>)
         if (typeof data?.role === 'string') this.role = data.role
+        if (typeof data?.username === 'string') this.username = data.username
         if (typeof data?.mustChangePassword === 'boolean') this.mustChangePassword = data.mustChangePassword
         if (typeof data?.maxContainers === 'number') this.maxContainers = data.maxContainers
       } catch {
@@ -178,6 +182,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = ''
       this.refreshExhausted = true
       this.role = ''
+      this.username = ''
       this.mustChangePassword = false
     },
     // codex R1 :102：API 收到 401 时清 access token（失效/被吊销）。
@@ -187,6 +192,7 @@ export const useAuthStore = defineStore('auth', {
     clearSession(): void {
       this.token = ''
       this.role = ''
+      this.username = ''
       this.mustChangePassword = false
     },
   },
