@@ -56,7 +56,13 @@ describe('durable background exec', () => {
     jobs = new BackgroundExecService(prisma, runtime, settings, hub)
     hub.publish.mockClear()
   })
-  afterEach(async () => { jobs.close(); runner?.dispose(); runner = undefined; await prisma.$disconnect() })
+  afterEach(async () => {
+    vi.useRealTimers()
+    jobs.close()
+    runner?.dispose()
+    runner = undefined
+    await prisma.$disconnect()
+  })
 
   function makeRunner(script: ScriptEntry[], interrupt = false) {
     const model = new ScriptedChatModel(script)
@@ -71,16 +77,30 @@ describe('durable background exec', () => {
   }
 
   it('returns synchronous results without a background notification and replays without relaunching', async () => {
+    // Keep the deadline fixed while the runtime and SQLite complete their work.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     runtime.immediate = true
-    expect(JSON.parse(await jobs.execute(cmd, 'lab', 'tc', 'echo hi')).state).toBe('succeeded')
-    await jobs.execute(cmd, 'lab', 'tc', 'echo hi')
+    const result = await jobs.execute(cmd, 'lab', 'tc', 'echo hi')
+    expect(JSON.parse(result)).toMatchObject({ state: 'succeeded', exitCode: 0, stdout: 'partial' })
+    expect(await jobs.execute(cmd, 'lab', 'tc', 'echo hi')).toBe(result)
     expect(runtime.starts).toHaveLength(1)
     expect(await jobs.list(cmd.ownerId, cmd.sessionId)).toEqual([])
+    expect(hub.publish).not.toHaveBeenCalled()
   })
 
   it('hands off at the foreground deadline, recovers in a new service and retains both output streams', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    const startedAt = Date.now()
+    const read = runtime.read.bind(runtime)
+    const foregroundRead = vi.spyOn(runtime, 'read').mockImplementationOnce(async spec => {
+      const snapshot = await read(spec)
+      vi.setSystemTime(startedAt + settings.foregroundMs)
+      return snapshot
+    })
     const response = JSON.parse(await jobs.execute(cmd, 'lab', 'tc', 'sleep 900'))
-    expect(response.background).toBe(true)
+    expect(foregroundRead).toHaveBeenCalledTimes(1)
+    expect(response).toMatchObject({ state: 'running', background: true })
+    expect(hub.publish).toHaveBeenCalledWith(cmd.ownerId, expect.objectContaining({ type: 'background_exec.updated' }))
     expect(await jobs.output(cmd.ownerId, cmd.sessionId, response.taskId)).toMatchObject({ state: 'running', stdout: 'partial' })
     jobs = new BackgroundExecService(prisma, runtime, settings, hub)
     runtime.finish(response.taskId)
