@@ -28,6 +28,36 @@ describe('#1037 建议生成契约', () => {
 
 describe('#1039 模型协议传输', () => {
   it.each([
+    ['https://api.deepseek.com', true],
+    ['https://api.deepseek.com/v1', true],
+    ['https://compatible.example/v1', false],
+  ] as const)('提示调用在 %s 仅对官方协议关闭思考，并保留 512 token 预算', async (baseUrl, disableThinking) => {
+    const bodies: Record<string, unknown>[] = []
+    const model = await defaultFactory('deepseek-flash', {
+      lcProvider: 'openai', apiKey: 'test-key', baseUrl, authHeader: false,
+      fetch: trackModelFetch(async (_input, init) => {
+        const body = JSON.parse(String(init?.body))
+        bodies.push(body)
+        const exhausted = disableThinking && body.max_tokens === 512 && body.thinking?.type !== 'disabled'
+        return Response.json({
+          id: 'test', model: 'deepseek-flash', object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content: exhausted ? '' : '请补充两组样本量和标准差' },
+            finish_reason: exhausted ? 'length' : 'stop' }],
+        })
+      }),
+    })
+    const messages = [new HumanMessage('只有两组均值，还缺哪些统计量？')]
+    const signal = new AbortController().signal
+    const result = await withModelTransport(signal, () => model.withConfig({ configurable: { maxTokens: 512 } })
+      .invoke(messages, { signal }), { purpose: 'next-step-suggestion' })
+    expect(result.text).toBe('请补充两组样本量和标准差')
+    expect(bodies[0]).toMatchObject({ model: 'deepseek-flash', max_tokens: 512 })
+    expect(bodies[0].thinking).toEqual(disableThinking ? { type: 'disabled' } : undefined)
+    await model.invoke(messages)
+    expect(bodies[1]).not.toHaveProperty('thinking')
+  })
+
+  it.each([
     ['openai', 'gpt-4o', 'max_tokens'],
     ['openai', 'gpt-5.1', 'max_completion_tokens'],
     ['anthropic', 'claude-sonnet-5-5', 'max_tokens'],
