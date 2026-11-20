@@ -14,15 +14,15 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - name: Run PR Agent with Kimi
+      - name: Run PR Agent with ZAI
         # the-pr-agent/pr-agent main，固定提交以避免上游 Action 静默变更。
         uses: the-pr-agent/pr-agent@e7fd5a233a4bf95d01a3c399e62768cb33172ec9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Kimi 的 Anthropic 兼容协议端点；密钥只从 Actions Secret 注入。
-          ANTHROPIC__KEY: ${{ secrets.KIMI_API_KEY }}
-          ANTHROPIC_API_BASE: "https://api.kimi.com/coding/"
-          config.model: "anthropic/k3.1-pro"
+          # ZAI 的 Anthropic 兼容协议端点；密钥只从 Actions Secret 注入。
+          ANTHROPIC__KEY: ${{ secrets.ZAI_API_KEY }}
+          ANTHROPIC_API_BASE: "https://open.bigmodel.cn/api/anthropic"
+          config.model: "anthropic/glm-5.3"
           # 不配置其他厂商的 fallback，避免失败时产生意外调用和费用。
           config.fallback_models: '[]'
           # 自定义模型不在内置 token 表中，按 256K 输入窗口处理 PR 上下文。
