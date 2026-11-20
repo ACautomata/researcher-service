@@ -213,3 +213,12 @@ fleet 目标镜像 `OPENCLAW_IMAGE` 随编排退役）。部署全流程（CD、
   （REST+SSE 编排）；admin 子应用 `/admin/` MPA（#800）。
 - 生产（#341）：`deploy/docker-compose.deploy.yml` + CD 构建 `server`/`frontend`/`wiki` 三镜像；
   Django 后端已退役。
+
+
+## 后台 Shell 任务
+
+`execute` 默认等待 10 分钟，随后返回任务 ID，让 ReAct Loop 继续。命令总硬超时默认
+24 小时，分别通过 `EXEC_FOREGROUND_MS` / `EXEC_HARD_TIMEOUT_MS` 设置。
+控制面重启可接管沙箱进程；宿主或沙箱重启不重跑命令。当前会话面板支持状态、分页日志和
+取消；结果在下一模型调用前注入，正常结束的会话自动续跑，审批暂停和用户停止不会被越过。
+完整生命周期、REST 契约和 Docker 验证要求见 [后台执行规格](../docs/specs/background-exec.md)。

@@ -26,6 +26,8 @@ import { prepareAttachment, validateAttachment, type PendingAttachment } from '@
 import RewindDialog from '@/components/chat/RewindDialog.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import LearningScope from '@/components/chat/LearningScope.vue'
+import BackgroundTasksPanel from '@/components/chat/BackgroundTasksPanel.vue'
+import { useBackgroundTasks } from '@/chat/useBackgroundTasks'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 // #980 全内嵌舱 composer 定稿（B3 变体 C 施工）——原型换壳层退役回直连（b3Prototype 仅留档参考）。
@@ -35,6 +37,7 @@ import TeamFolds from '@/components/chat/TeamFolds.vue'
 import FileTabsPanel from '@/components/chat/FileTabsPanel.vue'
 
 const chat = useChatStore()
+const background = useBackgroundTasks(() => chat.selectedSession)
 const auth = useAuthStore()
 // 视图专属态（errorMsg 上抛至此；connecting/disconnected/lastRunError/run 在 composable 内）
 const errorMsg = ref('')
@@ -126,6 +129,7 @@ function activateTab(path: string): void {
 
 // ---- 会话编排（三件套之三）----
 const conn = useChatSession({
+  onBackgroundChanged: () => { void background.refresh() },
   onError(message: string) {
     errorMsg.value = message
   },
@@ -502,6 +506,10 @@ defineExpose({
     </PanelTriState>
     <main class="main">
       <LearningScope :session-id="chat.selectedSession" />
+      <BackgroundTasksPanel v-if="chat.selectedSession" :session-id="chat.selectedSession"
+        :tasks="background.tasks.value" :expanded="background.expanded.value" :output="background.output.value"
+        :error="background.error.value" :busy="background.busy.value" @open="background.open"
+        @cancel="background.cancel" @page="background.page" @refresh="background.refresh" />
       <ChatHeader
         :title="currentSessionTitle"
         :connecting="connecting"

@@ -179,10 +179,10 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
     expect(seed.svc.stateOf(SESSION)?.state).toBe('completed')
 
     // 独立子进程：tsx 跑 runnerReplayChild.mts（新 Prisma/新 saver/新 RunService）
-    const tsxCli = path.join(process.cwd(), 'node_modules', '.bin', 'tsx')
+    const tsxCli = path.join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs')
     const childScript = path.join(process.cwd(), 'test', 'runnerReplayChild.mts')
     expect(existsSync(tsxCli)).toBe(true)
-    const child = spawn(tsxCli, [childScript], {
+    const child = spawn(process.execPath, [tsxCli, childScript], {
       cwd: process.cwd(),
       env: {
         ...process.env,

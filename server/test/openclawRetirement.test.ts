@@ -132,7 +132,7 @@ function walkFiles(dir: string): string[] {
 }
 
 function rel(file: string): string {
-  return file.slice(ROOT.length + 1)
+  return file.slice(ROOT.length + 1).replaceAll(String.fromCharCode(92), '/')
 }
 
 // 功能性引用形态（赋值 / 容器名前缀拼接 / 名字面量），注释里的键名提及（无赋值、无引号

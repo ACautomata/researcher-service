@@ -1,3 +1,4 @@
+import { EXEC_FOREGROUND_MS, EXEC_HARD_TIMEOUT_MS, EXEC_LOG_BYTES, EXEC_MAX_ACTIVE, EXEC_POLL_MS } from './runner/background/values'
 import 'dotenv/config'
 import path from 'node:path'
 import { isQuotaValid, QUOTA_MAX } from './auth/quota'
@@ -290,6 +291,13 @@ export const config = {
   runner: (() => {
     return {
       // 全局在飞 run 上限（进程内信号量；per-user 上限走 users.maxConcurrentRuns 列）
+      backgroundExec: {
+        foregroundMs: readPositiveEnvInt('EXEC_FOREGROUND_MS', EXEC_FOREGROUND_MS),
+        hardTimeoutMs: readPositiveEnvInt('EXEC_HARD_TIMEOUT_MS', EXEC_HARD_TIMEOUT_MS),
+        logBytes: EXEC_LOG_BYTES,
+        maxActive: EXEC_MAX_ACTIVE,
+        pollMs: EXEC_POLL_MS,
+      },
       maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
       // 图深度护栏（GraphRecursionError → run.failed{recursion_limit}；默认 500 = PoC 实测值）
       recursionLimit: readRunnerRecursionLimit(),

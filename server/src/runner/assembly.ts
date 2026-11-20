@@ -1,3 +1,5 @@
+import { BackgroundExecService } from './background/service'
+import { DockerBackgroundRuntime } from './background/dockerRuntime'
 import { CHAOXING_TOOL_NAME } from '../chaoxing/tools'
 // runner 生产装配（#777 · #747 A 节「集中式 runner」）：
 // PrismaCheckpointSaver + ProviderRegistry + ConcurrencyGate + StreamHub + DockerPrimitives
@@ -37,6 +39,7 @@ import { createPluginRuntime, resolvePluginConfig, type PluginRuntime } from '..
 import { BUILTIN_COMMANDS } from '../plugins/slash'
 
 export interface RunnerAssembly {
+  readonly background: BackgroundExecService
   readonly service: RunService
   readonly queue: BullMqRunQueue
   /** #790 通道③独立 run 的装配复用面（WikiUpdateRunService 共享同一 registry/primitives） */
@@ -202,7 +205,9 @@ export async function assembleRunner(opts: {
     pluginToolSpecs: (name) => plugins.toolSpecByName.get(name),
   })
 
+  const background = new BackgroundExecService(opts.prisma, new DockerBackgroundRuntime(), config.runner.backgroundExec, opts.hub, (id) => opts.sandboxes?.touch(id))
   const service = new RunService({
+    background,
     chaoxing: opts.chaoxing,
     prisma: opts.prisma,
     registry,
@@ -240,12 +245,14 @@ export async function assembleRunner(opts: {
 
   return {
     service,
+    background,
     queue,
     registry,
     primitives,
     fileJournal,
     plugins,
     close: async () => {
+      background.close()
       service.dispose()
       await queue.close()
     },

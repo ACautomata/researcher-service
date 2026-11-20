@@ -1,3 +1,5 @@
+import { BackgroundExecService, withBackgroundRun, resultMessageId } from '../background/service'
+import type { BackgroundExec } from '../../generated/prisma/client'
 import { NextStepSuggestions } from '../../sessions/nextStepSuggestion'
 import { createChaoxingTools, CHAOXING_LEARNING_PROMPT } from '../../chaoxing/tools'
 import type { ChaoxingService } from '../../chaoxing/service'
@@ -127,6 +129,7 @@ export type RecordTurnFn = (p: RecordTurnPayload) => Promise<string | void>
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
 // 重投可从头重跑，副作用幂等约束在案；重放归一化面见 normalizeReplay）。
 export interface RunCommand {
+  readonly backgroundRecoveryTaskId?: string
   readonly suggestionVersion?: number
   readonly suggestionUserText?: string
   readonly runId: string
@@ -177,6 +180,7 @@ export interface RunSnapshot {
 export type EventPublisher = Pick<StreamHub, 'publish'>
 
 export interface RunServiceDeps {
+  readonly background?: BackgroundExecService
   readonly chaoxing?: ChaoxingService
   readonly prisma: PrismaClient
   readonly registry: ProviderRegistry
@@ -529,6 +533,47 @@ export class RunService {
     return this.deps.gate.wouldReject(ownerId)
   }
 
+  // Poller retries pending delivery until the deterministic result message is checkpointed.
+  // A live graph consumes it in beforeModel; terminal graphs get a serialized continuation.
+  async wakeBackground(tasks: BackgroundExec[]): Promise<void> {
+    if (!tasks.length || !this.deps.background) return
+    const threadId = tasks[0]!.threadId
+    const tuple = await this.deps.saver.getTuple({ configurable: { thread_id: threadId } })
+    const messages = (tuple?.checkpoint.channel_values.messages ?? []) as BaseMessage[]
+    const ids = new Set(messages.map(m => m.id))
+    await this.deps.background.acknowledge(tasks.filter(t => ids.has(resultMessageId(t.id))).map(t => t.id))
+    const pending = (await this.deps.background.pending(threadId)).filter(t => !ids.has(resultMessageId(t.id)))
+    if (!pending.length) return
+    const state = this.stateOf(threadId)?.state
+    if (state && !['completed', 'failed'].includes(state)) return
+    if (await this.threadInterruptedFromCheckpoint(threadId)) return
+    // Recheck after checkpoint I/O: a user request may have started while awaiting it.
+    const latestState = this.stateOf(threadId)?.state
+    if (latestState && !['completed', 'failed'].includes(latestState)) return
+    const source = pending[0]!
+    const cmd = JSON.parse(source.runCommandJson) as RunCommand
+    // A failed automatic turn is visible to the user; do not reserve a queued state
+    // for the same retained failed BullMQ job on every poll. New user turns still consume pending results.
+    const automaticId = `background-${source.id}`
+    if ((latestState === 'failed' && this.stateOf(threadId)?.runId === automaticId)
+      || (source.loopState === 'failed' && cmd.runId === automaticId)) return
+    // Stable command id also lets normalizeReplay recover a controller crash after dispatch.
+    const previous = this.runs.get(threadId)
+    // A crash before the original run settled must resume its checkpoint, not append
+    // a new message over a pending tool node. Preserve runId for shell launch deduplication.
+    const recovery = !latestState && source.loopState === null
+    const next: RunCommand = recovery
+      ? { ...cmd, kind: 'recover', backgroundRecoveryTaskId: source.id }
+      : { ...cmd, kind: 'message', operation: undefined, attachmentIds: undefined,
+          backgroundRecoveryTaskId: undefined, runId: `background-${source.id}`,
+          content: '请处理已完成的后台执行结果。', suggestionVersion: undefined, suggestionUserText: undefined }
+    this.runs.set(threadId, { runId: next.runId, state: 'queued' })
+    try { await this.dispatch(next) } catch (e) {
+      if (previous) this.runs.set(threadId, previous); else this.runs.delete(threadId)
+      console.error('[background-exec] continuation', e)
+    }
+  }
+
   // ---- 执行（传输面调用点：Inline 直调 / BullMQ worker processor）----
   // 同 thread 串行链：任意时刻同 thread 至多一个 executeRun 在跑，其余按提交序排队。
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
@@ -656,7 +701,16 @@ export class RunService {
   }
 
   private async executeNow(cmd: RunCommand): Promise<void> {
+    const backgroundSourceId = cmd.backgroundRecoveryTaskId ?? (cmd.runId.startsWith('background-') ? cmd.runId.slice('background-'.length) : null)
+    if (backgroundSourceId && this.deps.background) {
+      const source = await this.deps.prisma.backgroundExec.findUnique({ where: { id: backgroundSourceId } })
+      if (!source || source.delivery === 'suppressed') {
+        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
+        return
+      }
+    }
     const parentId = cmd.parentSessionId ?? cmd.sessionId
+    if (cmd.abort) await this.deps.background?.cancel(cmd.ownerId, parentId)
     let shared = this.sessionLeases.get(parentId)
     if (!shared) {
       shared = { ownerId: cmd.ownerId, threads: new Set(), lease: this.deps.gate.acquire(cmd.ownerId) }
@@ -1014,6 +1068,7 @@ export class RunService {
     let anchorCheckpointId: string | null = null
     let input: unknown = null
     try {
+      await this.deps.background?.beginRun(cmd)
       if (cmd.kind === 'resume' && cmd.mailWaitId) {
         await this.deps.teammates?.clearWait(cmd.sessionId, cmd.mailWaitId)
         if (cmd.mailWakeReason === 'timeout' && this.deps.teammates) {
@@ -1171,7 +1226,7 @@ export class RunService {
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 六件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
         const pluginFrame = await this.buildPluginRunFrame(cmd, labContainer, snapshot, controller.signal)
-        await runWithRunContext(cmd.runId, async () => {
+        await withBackgroundRun(cmd, controller.signal, () => runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
               ...invocation,
@@ -1189,7 +1244,7 @@ export class RunService {
               }
             }
           })
-        })
+        }))
         // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
         const state = await this.graphState(agent, cmd.sessionId)
         anchorCheckpointId = state.config?.configurable?.checkpoint_id ?? null
@@ -1447,6 +1502,7 @@ export class RunService {
           console.warn('[next-step] source extraction failed', { sessionId: cmd.sessionId, runId: cmd.runId })
         }
       }
+      await this.deps.background?.settleRun(cmd, finalState ?? 'failed')
       // 治理镜像 dispose（#790）：completed（finish 已推回）/ interrupted / failed / aborted
       // 全路径作废——「中断 = 作废不推回」（AC③），推回后的副本亦无用。
       await wikiMirror?.dispose()
@@ -2024,15 +2080,16 @@ export class RunService {
   // 校验节点（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
   // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。四依赖全缺 = 空数组（调用点
   // 不挂 middleware）——leader 图与 wiki-update 图共用本单一来源。
-  private runtimeMiddleware(): AnyAgentMiddleware[] {
+  private runtimeMiddleware(threadId: string): AnyAgentMiddleware[] {
     // #792：plugins 面也依赖 toolCallContext ALS（figures 去重身份 = 真实 tool_call_id，
     // tools.ts 同源读取）——四依赖 + plugins 任一存在即挂链。
-    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal && !this.deps.plugins) return []
+    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal && !this.deps.plugins && !this.deps.background) return []
     return [
       createToolCallContextMiddleware(),
       ...(this.deps.teammates ? [teammateDelegation] : []),
       ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
       ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
+      ...(this.deps.background ? [this.deps.background.middleware(threadId)] : []),
     ]
   }
 
@@ -2072,14 +2129,14 @@ export class RunService {
     // primitives 进程级单例），同键必同工具面——「同参数必同拓扑」纯函数约束保持。
     // 检索只读（getArchive 拉镜像），不经写锁面（#785 锁只覆盖 putArchive/破坏性 op）。
     const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
-    const middleware = this.runtimeMiddleware()
+    const middleware = this.runtimeMiddleware(threadId)
     const agent = buildLeaderAgent({
       model,
-      backend,
+      backend: this.deps.background?.backend(backend, labContainer) ?? backend,
       checkpointer: this.deps.saver,
       systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, this.deps.chaoxing ? CHAOXING_LEARNING_PROMPT : undefined),
       interruptPolicy: policy,
-      tools: [...wikiTools, ...tools, ...(this.deps.chaoxing ? createChaoxingTools(this.deps.chaoxing, ownerId) : [])],
+      tools: [...wikiTools, ...tools, ...(this.deps.background?.tools(ownerId, sandboxSessionId) ?? []), ...(this.deps.chaoxing ? createChaoxingTools(this.deps.chaoxing, ownerId) : [])],
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins
@@ -2141,15 +2198,15 @@ export class RunService {
       auditor: this.overwriteAuditor,
     })
     const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer: p.wikiContainer })
-    const middleware = this.runtimeMiddleware()
+    const middleware = this.runtimeMiddleware(p.threadId)
     return buildLeaderAgent({
       model: p.model,
-      backend,
+      backend: this.deps.background?.backend(backend, p.labContainer) ?? backend,
       checkpointer: this.deps.saver,
       // 两段必填——filter(Boolean) 对本调用点无行为影响（joinSections 收敛，#747 R1 Standards⑦）。
       systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, WIKI_UPDATE_TEAMMATE_PROMPT),
       interruptPolicy: p.policy,
-      tools: [...wikiTools, ...p.teammateTools, ...p.lifecycleTools],
+      tools: [...wikiTools, ...p.teammateTools, ...p.lifecycleTools, ...(this.deps.background?.tools(p.capabilities.ownerId, p.sandboxSessionId) ?? [])],
       ...(middleware.length > 0 ? { middleware } : {}),
     })
   }

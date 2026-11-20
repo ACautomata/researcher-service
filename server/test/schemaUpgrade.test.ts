@@ -13,7 +13,7 @@ function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
     // better-sqlite3 命名参数经对象绑定（$name）；表/索引名来自上方常量数组，无注入面。
-    for (const table of ['text_trace_logs', 'figures']) {
+    for (const table of ['text_trace_logs', 'figures', 'background_execs']) {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=$name").get({ name: table }),
       ).toEqual({ name: table })
@@ -51,7 +51,7 @@ function assertUpgraded(dbPath: string): void {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(18) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
+    expect(db.pragma('user_version', { simple: true })).toBe(19) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)

@@ -51,6 +51,7 @@ const RUN_ERROR_LABELS: Record<string, string> = {
 export interface RunError { kind: string; label: string; detail?: string }
 
 export interface ChatSessionDeps {
+  onBackgroundChanged?(): void
   /** 动作类失败（用户主动发起的发送/中断/审批/删除）→ 瞬时 toast，不进顶部横幅 */
   onActionError?(message: string): void
   /** 加载失败（投影/列表拉取）→ 顶部横幅 detail */
@@ -258,6 +259,10 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
 
   // ---- SSE 事件分派（业务面）----
   function onEvent(e: SessionEvent): void {
+    if (e.type === 'background_exec.updated') {
+      if (e.sessionId === chat.selectedSession) deps.onBackgroundChanged?.()
+      return
+    }
     if (e.type === 'session.created') {
       const s = readSummary(e.payload.session)
       if (s) chat.upsertSession(s)

@@ -31,7 +31,7 @@ export type EventStreamStatus = 'connecting' | 'open' | 'disconnected' | 'closed
 // 'error' 与 EventSource 原生连接错误事件同名：named 帧（MessageEvent 带 data JSON）走
 // 目录分派；原生断线错误（plain Event 无 data）被坏帧守卫丢弃，断线语义仍归 onerror。
 const EVENT_NAMES = [
-  'stream.opened', 'error', 'session.created', 'session.updated', 'session.invalidated',
+  'background_exec.updated', 'stream.opened', 'error', 'session.created', 'session.updated', 'session.invalidated',
   'session.terminated', 'run.started', 'run.resumed', 'run.completed', 'run.failed',
   'run.aborted', 'run.suspended', 'text.delta', 'thinking.delta', 'tool.start', 'tool.end',
   'attachment', 'figure_run.progress', 'research_run.progress', 'approval.requested',

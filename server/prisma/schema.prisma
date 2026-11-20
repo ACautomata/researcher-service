@@ -247,6 +247,7 @@ model Session {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  backgroundTasks BackgroundExec[]
   messages    SessionMessage[]
   checkpoints Checkpoint[]
   checkpointWrites CheckpointWrite[]
@@ -657,4 +658,35 @@ model ChaoxingAuthorization {
   expiresAt DateTime
   @@index([ownerId])
   @@map("chaoxing_authorizations")
+}
+
+// Durable shell executions belong to the sandbox's parent session; threadId retains
+// the originating leader/teammate checkpoint identity. Never copied by fork.
+model BackgroundExec {
+  id String @id
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+  threadId String
+  ownerId String
+  runId String
+  toolCallId String
+  command String
+  container String
+  runCommandJson String
+  loopState String?
+  state String @default("starting")
+  background Boolean @default(false)
+  delivery String @default("pending")
+  stdout String @default("")
+  stderr String @default("")
+  truncated Boolean @default(false)
+  exitCode Int?
+  hardTimeoutMs Int
+  logBytes Int
+  createdAt DateTime @default(now())
+  finishedAt DateTime?
+  updatedAt DateTime @updatedAt
+  @@index([sessionId, createdAt])
+  @@index([state, delivery])
+  @@map("background_execs")
 }
