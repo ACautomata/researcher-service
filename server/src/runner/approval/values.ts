@@ -70,6 +70,11 @@ export const FILE_TOOLS: readonly string[] = [
   'grep',
   'openwiki_search',
   'openwiki_read',
+  // skill 渐进披露读取（#1057 C 票，#1054 D4）：只读市场数据面——resource 参数是包内相对
+  // 路径（非容器路径），刻意避开 FILE_PATH_PARAM_NAMES（path/file_path）以免路径白名单
+  // 误判包内路径 → 规则层零 LLM 直放（openwiki_search/read 同款先例）。同时经 assembly
+  // coreToolNames 进入工具名全局唯一保留集（插件工具不得遮蔽 read_skill）。
+  'read_skill',
 ]
 // 文件类工具的字面路径参数候选名（双形态并收——deepagents 升级参数改名时测试红，不静默漏判）。
 export const FILE_PATH_PARAM_NAMES: readonly string[] = ['file_path', 'path']
