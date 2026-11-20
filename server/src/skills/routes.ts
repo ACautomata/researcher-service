@@ -48,12 +48,16 @@ export function createSkillsRouter(deps: SkillsRouterDeps): Router {
   router.get('/', async (req: Request, res: Response) => {
     const category = typeof req.query.category === 'string' ? req.query.category.slice(0, 32) : undefined
     const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 100) : undefined
-    ok(res, await deps.service.listPackages({ category, q }))
+    ok(res, await deps.service.listPackages({
+      ...(category !== undefined ? { category } : {}),
+      ...(q !== undefined ? { q } : {}),
+      viewerId: req.user!.id,
+    }))
   })
 
   // GET /:id —— 包详情（文件清单 + 元数据；80041 不存在同码防探测）。
   router.get('/:id', async (req: Request, res: Response) => {
-    ok(res, await deps.service.getPackage(pathId(req)))
+    ok(res, await deps.service.getPackage(pathId(req), req.user!.id))
   })
 
   // GET /:id/download —— 原生 zip 字节（成功豁免信封；Content-Disposition 带包名）。
