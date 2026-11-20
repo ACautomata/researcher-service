@@ -13,7 +13,9 @@
 // 10→11 #786 isTeammate；11→12 #785 file_overwrite_logs；12→13 #790 teammates.kind +
 // #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）；
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
-// minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）。
+// minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）；
+// 18→19 #1046 durable background_execs + #1055 Skill 市场三表（均 additive：background_execs /
+// skill_packages/skill_files/skill_enablements）。
 export const SCHEMA_VERSION = 19
 
 export function runIncrementalSchema(db) {
@@ -706,6 +708,50 @@ CREATE TABLE IF NOT EXISTS "plugin_llm_assignments" (
 
   // ④ 唯一索引（copy-rebuild 后随新表重建；fresh 库幂等命中）
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId")`)
+
+  // 18→19 #1055 Skill 市场三表（additive；DDL 镜像 prisma/init.sql —— prisma migrate diff 派生）。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "skill_packages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "description" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "uploaderId" TEXT NOT NULL,
+    "uploaderRole" TEXT NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'published',
+    "publishedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "skill_packages_uploaderId_fkey" FOREIGN KEY ("uploaderId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "skill_files" (
+    "packageId" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "mime" TEXT NOT NULL,
+    "size" INTEGER NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "content" BLOB NOT NULL,
+
+    PRIMARY KEY ("packageId", "path"),
+    CONSTRAINT "skill_files_packageId_fkey" FOREIGN KEY ("packageId") REFERENCES "skill_packages" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "skill_enablements" (
+    "ownerId" TEXT NOT NULL,
+    "skillId" TEXT NOT NULL,
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "enabledAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY ("ownerId", "skillId"),
+    CONSTRAINT "skill_enablements_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "skill_packages_name_key" ON "skill_packages"("name");
+CREATE INDEX IF NOT EXISTS "skill_packages_category_idx" ON "skill_packages"("category");
+CREATE INDEX IF NOT EXISTS "skill_packages_uploaderId_idx" ON "skill_packages"("uploaderId");
+CREATE INDEX IF NOT EXISTS "skill_enablements_skillId_idx" ON "skill_enablements"("skillId");
+`)
 }
 
 // baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。

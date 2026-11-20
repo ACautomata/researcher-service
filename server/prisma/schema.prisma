@@ -59,6 +59,9 @@ model User {
   modelProviders   ModelProvider[] // 归属上移：provider 配置挂用户（731 §3.2）
   attachments      Attachment[]
   chaoxingBinding ChaoxingBinding?
+  // --- Skill 市场（#1055 · #1054 D1–D5）---
+  skillPackages   SkillPackage[]
+  skillEnablements SkillEnablement[]
   chaoxingAuthorizations ChaoxingAuthorization[]
   pluginEnablements PluginEnablement[]
   pluginLlmAssignments PluginLlmAssignment[]
@@ -658,6 +661,55 @@ model ChaoxingAuthorization {
   expiresAt DateTime
   @@index([ownerId])
   @@map("chaoxing_authorizations")
+}
+
+// ---------------------------------------------------------------------------
+// Skill 市场（#1055 · #1054 D1–D5）：数据市场（纯 markdown 数据包，D2——zip 内仅白名单
+// 静态资源，可执行件整包拒收）。字节落 DB BLOB（D3，figures 先例）：zip 解析校验通过后
+// 按文件存 skill_files，下载端点重打包还原。V1 全员直发（D1），status 预留待审语义空间。
+// ---------------------------------------------------------------------------
+model SkillPackage {
+  id           String @id // 雪花（attachments/snowflake 同一单点生成）
+  name         String @unique // 全局唯一；管线层拒保留字（registry + 内置命令同源纪律）
+  description  String
+  category     String // 固定枚举（SKILL_CATEGORIES，管线层校验）
+  uploaderId   String
+  uploader     User   @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  uploaderRole String // admin | user（D1 来源记录，审计面）
+  sha256       String // 整包 zip 内容校验
+  status       String @default("published") // D1 V1 恒 published；预留待审语义空间
+  publishedAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  files SkillFile[]
+  @@index([category])
+  @@index([uploaderId])
+  @@map("skill_packages")
+}
+
+model SkillFile {
+  package SkillPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  packageId String
+  path    String // zip 内相对路径（SKILL.md 恒在包根）
+  mime    String
+  size    Int
+  sha256  String
+  content Bytes
+
+  @@id([packageId, path])
+  @@map("skill_files")
+}
+
+model SkillEnablement {
+  owner    User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId  String
+  skillId  String
+  enabled  Boolean @default(true)
+  enabledAt DateTime @default(now())
+
+  @@id([ownerId, skillId])
+  @@index([skillId])
+  @@map("skill_enablements")
 }
 
 // Durable shell executions belong to the sandbox's parent session; threadId retains

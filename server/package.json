@@ -29,6 +29,7 @@
     "@prisma/adapter-better-sqlite3": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "@xmldom/xmldom": "^0.9.12",
+    "adm-zip": "^0.6.1",
     "bcryptjs": "^3.0.2",
     "better-sqlite3": "^12.10.1",
     "bullmq": "^6.0.5",
@@ -50,6 +51,7 @@
   },
   "devDependencies": {
     "@prisma/config": "^7.5.0",
+    "@types/adm-zip": "^0.5.8",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.8",

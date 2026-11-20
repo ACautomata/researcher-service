@@ -193,8 +193,6 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
       warns.push(args.map(String).join(' '))
     })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    // @ts-expect-error -- .mjs 无 d.ts（纯 JS 迁移脚本）
     const mod = (await import('../scripts/lib/incremental-schema.mjs')) as { runIncrementalSchema(db: Database.Database): void }
     const db = new Database(dbPath)
     try {
@@ -282,9 +280,7 @@ CREATE TABLE "model_providers" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 `)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // @ts-expect-error -- .mjs 无 d.ts（纯 JS 迁移脚本）
-    const mod = (await import('../scripts/lib/incremental-schema.mjs')) as { runIncrementalSchema(db: Database.Database): void }
+      const mod = (await import('../scripts/lib/incremental-schema.mjs')) as { runIncrementalSchema(db: Database.Database): void }
       const cases = ENDPOINT_PRESETS.map((p, i) => ({
         id: `row-${i}`,
         baseUrl: p.baseUrl,
@@ -313,8 +309,6 @@ CREATE TABLE "model_providers" (
     vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
       warns.push(args.map(String).join(' '))
     })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    // @ts-expect-error -- .mjs 无 d.ts（纯 JS 迁移脚本）
     const mod = (await import('../scripts/lib/incremental-schema.mjs')) as { runIncrementalSchema(db: Database.Database): void }
     const db = new Database(dbPath)
     try {
