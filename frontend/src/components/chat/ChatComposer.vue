@@ -14,7 +14,7 @@ import type { PendingAttachment } from '@/chat/attachments'
 import type { AvailableModelDTO } from '@/api/models'
 import type { PreferredModelRef } from '@/api/sessions'
 import { DEFAULT_EFFORT_TIER, EFFORT_STOPS, clampTier, tierLabel, type EffortTier } from '@/chat/effort'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, useId, watch } from 'vue'
 
 const props = withDefaults(
   defineProps<{
@@ -72,15 +72,20 @@ const sendDisabled = computed(
   () => attachDisabled.value || props.rewindBusy || props.forkBusy,
 )
 
-const visibleSuggestion = computed(() => !props.modelValue && !sendDisabled.value && !props.slashOpen ? props.nextStepSuggestion : '')
 const composing = ref(false)
+const suggestionHintId = useId()
+const visibleSuggestion = computed(() =>
+  !props.modelValue && !sendDisabled.value && !props.slashOpen && !composing.value ? props.nextStepSuggestion : '',
+)
 async function onKeydown(e: KeyboardEvent): Promise<void> {
-  if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && !composing.value && e.keyCode !== 229 && visibleSuggestion.value) {
+  if (composing.value || e.isComposing || e.keyCode === 229) return
+  const el = inputEl.value
+  if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+      visibleSuggestion.value && el && el === document.activeElement && el.value === '') {
     e.preventDefault()
     emit('acceptSuggestion')
     await nextTick()
-    const el = inputEl.value
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length) }
+    if (el === document.activeElement) el.setSelectionRange(el.value.length, el.value.length)
     return
   }
   emit('keydown', e)
@@ -128,9 +133,27 @@ function resize(): void {
   const el = inputEl.value
   if (!el) return
   el.style.height = 'auto'
-  el.style.height = `${Math.min(el.scrollHeight, 180)}px`
+  const height = el.scrollHeight
+  el.style.height = `${visibleSuggestion.value ? height : Math.min(height, 180)}px`
 }
-watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
+watch([() => props.modelValue, visibleSuggestion], () => void nextTick(resize), { immediate: true })
+watch([inputEl, visibleSuggestion], ([el, suggestion], _previous, onCleanup) => {
+  if (!el || !suggestion || typeof ResizeObserver === 'undefined') return
+  let width = el.clientWidth
+  let frame = 0
+  const observer = new ResizeObserver(() => {
+    if (el.clientWidth === width) return
+    width = el.clientWidth
+    // 在下一帧调整高度，避免观察回调内写入尺寸触发回环。
+    cancelAnimationFrame(frame)
+    frame = requestAnimationFrame(resize)
+  })
+  observer.observe(el)
+  onCleanup(() => {
+    observer.disconnect()
+    cancelAnimationFrame(frame)
+  })
+}, { flush: 'post' })
 
 // ---- 模型 chip + 上拉菜单（舱内 chip 上方弹出，#980）----
 const menuOpen = ref(false)
@@ -265,13 +288,15 @@ function onSegsKeydown(e: KeyboardEvent): void {
         :aria-expanded="slashOpen"
         :aria-controls="slashOpen ? 'slash-command-menu' : undefined"
         :aria-activedescendant="slashOpen ? `slash-command-${slashIndex}` : undefined"
-        :aria-describedby="visibleSuggestion ? 'next-step-hint' : argumentHint ? 'slash-argument-hint' : undefined"
+        :aria-describedby="visibleSuggestion ? suggestionHintId : argumentHint ? 'slash-argument-hint' : undefined"
         @input="onInput"
         @keydown="onKeydown"
         @compositionstart="composing = true"
         @compositionend="composing = false"
       ></textarea>
-      <span v-if="visibleSuggestion" id="next-step-hint" class="sr-only">下一步提示：{{ visibleSuggestion }}。按 Tab 采用为可编辑草稿。</span>
+      <span :id="suggestionHintId" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        <template v-if="visibleSuggestion">下一步提示：{{ visibleSuggestion }}。按 Tab 采用为可编辑草稿。</template>
+      </span>
       <div class="dock">
         <button
           type="button"
@@ -394,8 +419,11 @@ function onSegsKeydown(e: KeyboardEvent): void {
 .pod { display: flex; flex-direction: column; width: 100%; max-width: 840px; margin: 0 auto; border: 1px solid var(--el-border-color); border-radius: 12px; background: var(--el-bg-color); }
 .pod:focus-within { border-color: var(--el-color-primary); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.pod textarea.has-suggestion::placeholder { color: var(--el-text-color-secondary); opacity: 1; }
+.pod textarea.has-suggestion::placeholder { color: var(--el-text-color-regular); opacity: 1; }
 .pod textarea { display: block; width: 100%; border: none; outline: none; resize: none; min-height: 52px; max-height: 180px; overflow-y: auto; padding: 8px 10px 4px; background: transparent; box-sizing: border-box; font: inherit; }
+
+.pod textarea.has-suggestion { max-height: none; }
+.pod textarea:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; border-radius: 10px; }
 
 /* 舱内底排（左→右）：📎 → 推理强度段控件 → 模型 chip → 圆形发送键 */
 .dock { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 8px 7px; }

@@ -91,6 +91,9 @@ class FakeEventSource extends EventTarget {
 const S1 = { id: 'sess-1', title: '文献综述', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-06T00:00:00Z' }
 const S2 = { id: 'sess-2', title: '实验记录', createdAt: '2026-10-02T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' }
 
+const SUGGESTION = '请设计验证实验'
+const DRAFT_KEY = 'researcher:draft:signed-out:sess-1'
+
 const PROJECTION = {
   sessionId: 'sess-1',
   title: '文献综述',
@@ -100,8 +103,21 @@ const PROJECTION = {
   ],
 }
 
-async function mountChat() {
-  const wrapper = mount(ChatView, { global: { plugins: [createPinia()] } })
+const PROJECTION_WITH_SUGGESTION = {
+  ...PROJECTION,
+  suggestionVersion: 1,
+  nextStepSuggestion: { text: SUGGESTION, runId: 'r0', messageId: 'm2', version: 1 },
+}
+
+function refreshProjection() {
+  FakeEventSource.last()!.emit('session.updated', {
+    type: 'session.updated', sessionId: S1.id, payload: { projectionChanged: true },
+  })
+  return flushPromises()
+}
+
+async function mountChat(attachTo?: HTMLElement) {
+  const wrapper = mount(ChatView, { attachTo, global: { plugins: [createPinia()] } })
   await flushPromises()
   return wrapper
 }
@@ -110,6 +126,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   FakeEventSource.instances = []
   sessionStorage.clear()
+  localStorage.removeItem(DRAFT_KEY)
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.clearAllMocks()
   vi.mocked(api.uploadSessionAttachment).mockReset()
@@ -133,22 +150,156 @@ afterEach(() => {
 })
 
 describe('ChatView（REST+SSE 三件套接线）', () => {
-  it('#1037 晚到投影在真实输入框展示，Tab 采用后可编辑，点击发送才提交', async () => {
-    const w = await mountChat()
-    vi.mocked(api.getSessionProjection).mockResolvedValue({ ...PROJECTION, suggestionVersion: 1,
-      nextStepSuggestion: { text: '请设计验证实验', runId: 'r0', messageId: 'm2', version: 1 } })
-    FakeEventSource.last()!.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
-    await flushPromises()
+  it('#1040 晚到提示通过实时区域播报，采用后单独编辑和发送', async () => {
+    const w = await mountChat(document.body)
     const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    input.element.focus()
+    const announcement = w.get('[data-test="composer"] [role="status"][aria-live="polite"]')
+    expect(announcement.text()).toBe('')
+
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    await refreshProjection()
     expect(input.element.value).toBe('')
-    expect(input.attributes('placeholder')).toBe('请设计验证实验')
-    await input.trigger('keydown', { key: 'Tab' })
-    expect(input.element.value).toBe('请设计验证实验')
-    expect(input.element.selectionStart).toBe('请设计验证实验'.length)
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    expect(w.get('[data-test="composer"] [role="status"][aria-live="polite"]').element).toBe(announcement.element)
+    expect(input.attributes('aria-describedby')).toBe(announcement.attributes('id'))
+    expect(announcement.text()).toContain(`下一步提示：${SUGGESTION}。按 Tab 采用`)
+    await w.get('[data-test="send"]').trigger('click')
     expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
+
+    await input.trigger('keydown', { key: 'Tab' })
+    expect(input.element.value).toBe(SUGGESTION)
+    expect(input.element.selectionStart).toBe(SUGGESTION.length)
+    expect(input.element.selectionEnd).toBe(SUGGESTION.length)
+    expect(document.activeElement).toBe(input.element)
+    expect(announcement.text()).toBe('')
+    expect(localStorage.getItem(DRAFT_KEY)).toBe(SUGGESTION)
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+
     await input.setValue('请设计一组小规模验证实验')
     await w.get('[data-test="send"]').trigger('click')
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '请设计一组小规模验证实验', expect.any(String), undefined)
+    expect(api.sendSessionMessage).toHaveBeenCalledWith(S1.id, '请设计一组小规模验证实验', expect.any(String), undefined)
+    w.unmount()
+  })
+
+  it('#1040 迟到提示保留手动输入和粘贴，清空后可重显，历史恢复只取真实消息', async () => {
+    const w = await mountChat(document.body)
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    input.element.focus()
+    await input.setValue('我正在写')
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    await refreshProjection()
+    expect(input.element.value).toBe('我正在写')
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+
+    await input.setValue('')
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    // jsdom 不执行浏览器原生文本粘贴，派发粘贴及随后的 insertFromPaste 输入事件。
+    await input.trigger('paste')
+    input.element.value = '粘贴的草稿'
+    input.element.dispatchEvent(new InputEvent('input', { inputType: 'insertFromPaste', bubbles: true }))
+    await flushPromises()
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+    expect(localStorage.getItem(DRAFT_KEY)).toBe('粘贴的草稿')
+
+    await input.setValue('')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    expect(input.element.value).toBe('第一问')
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    expect(input.element.value).toBe('')
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
+    w.unmount()
+  })
+
+  it('#1040 恢复的草稿优先于投影提示，清空后原有斜杠 Tab 补全优先', async () => {
+    localStorage.setItem(DRAFT_KEY, '恢复的草稿')
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    const w = await mountChat(document.body)
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    input.element.focus()
+    expect(input.element.value).toBe('恢复的草稿')
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+    await input.setValue('')
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    await input.setValue('/m')
+    await input.trigger('keydown', { key: 'Tab' })
+    expect(input.element.value).toBe('/model ')
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it('#1040 输入法合成期间，缺少 isComposing 标记的键盘事件也不采用或发送', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    const w = await mountChat(document.body)
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    input.element.focus()
+    await input.trigger('compositionstart')
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+    expect(input.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))).toBe(true)
+    expect(input.element.value).toBe('')
+    await input.setValue('正在合成')
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    await input.trigger('compositionend')
+    await input.setValue('')
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    w.unmount()
+  })
+
+  it('#1040 有附件时，采用和编辑提示保留预览且不上传', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    const w = await mountChat(document.body)
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    const fileInput = w.get<HTMLInputElement>('[data-test="file-input"]')
+    Object.defineProperty(fileInput.element, 'files', { value: [new File(['data'], 'data.txt')] })
+    await fileInput.trigger('change')
+    await flushPromises()
+    const preview = w.get('[data-test="preview-item"]')
+    expect(preview.text()).toContain('data.txt')
+
+    input.element.focus()
+    await input.trigger('keydown', { key: 'Tab' })
+    expect(input.element.value).toBe(SUGGESTION)
+    await input.setValue('分析附件里的数据')
+    expect(w.get('[data-test="preview-item"]').element).toBe(preview.element)
+    expect(api.uploadSessionAttachment).not.toHaveBeenCalled()
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it.each(['回退', '派生'])('#1040 %s在途时禁止采用，仍可编辑并保留草稿', async (action) => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION_WITH_SUGGESTION)
+    let rejectAction!: (error: Error) => void
+    const pending = new Promise<never>((_resolve, reject) => { rejectAction = reject })
+    const w = await mountChat(document.body)
+    const input = w.get<HTMLTextAreaElement>('[data-test="input"]')
+    expect(input.attributes('placeholder')).toBe(SUGGESTION)
+    if (action === '回退') {
+      vi.mocked(api.previewSessionRewind).mockResolvedValueOnce({ anchor: 'ck1', revertOps: 0, pathSample: [], pathTotal: 0, execCrossed: [] })
+      vi.mocked(api.rewindSession).mockReturnValueOnce(pending)
+      await w.findAll('[data-test="rewind"]')[1].trigger('click')
+      await flushPromises()
+      document.querySelector<HTMLButtonElement>('[data-test="restore-confirm"]')!.click()
+    } else {
+      vi.mocked(api.forkSession).mockReturnValueOnce(pending)
+      await w.findAll('[data-test="fork"]')[1].trigger('click')
+    }
+    await flushPromises()
+
+    expect(w.get<HTMLButtonElement>('[data-test="send"]').element.disabled).toBe(true)
+    expect(input.attributes('placeholder')).not.toBe(SUGGESTION)
+    input.element.focus()
+    expect(input.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))).toBe(true)
+    expect(input.element.value).toBe('')
+    await input.setValue('操作期间写的新草稿')
+    rejectAction(new Error('操作失败'))
+    await flushPromises()
+    expect(input.element.value).toBe('操作期间写的新草稿')
+    expect(localStorage.getItem(DRAFT_KEY)).toBe('操作期间写的新草稿')
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
     w.unmount()
   })
 
