@@ -521,14 +521,18 @@ describe('会话 REST 域（S1，#778）', () => {
     }
   }, 30_000)
 
-  it.each(['', 'x'.repeat(121), '第一行\n第二行', '**请分析**', '{"suggestion":"请分析"}', '["请分析"]'])('#1037 空或非法结果不显示且主回复保持原文 (%s)', async text => {
+  it.each(['', 'NO_SUGGESTION', 'x'.repeat(121), '第一行\n第二行', '**请分析**', '{"suggestion":"请分析"}', '["请分析"]'])('#1037 空或非法结果不显示且主回复保持原文 (%s)', async text => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
     suggestionText = text
     currentScript = [new AIMessage('正式答复')]
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '无建议' })
     const id = created.body.data.id as string
     await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
       .set('Idempotency-Key', hexKey(4037)).send({ content: '问题' })
-    await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 1)
+    const reason = text === '' || text === 'NO_SUGGESTION' ? 'empty' : 'invalid_output'
+    await waitFor(() => log.mock.calls.some(([, details]) => details?.sessionId === id))
+    expect(log).toHaveBeenCalledWith('[next-step]', expect.objectContaining({ sessionId: id, reason }))
+    expect(await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } })).toBe(1)
     const projection = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
     expect(projection.body.data.nextStepSuggestion).toBeNull()
     expect(projection.body.data.messages.at(-1).content).toBe('正式答复')
