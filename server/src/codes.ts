@@ -52,6 +52,10 @@ export const CODE = {
   // 90002，80001 仅插件域语义化校验失败如未知 pluginId 启用请求外的域内约束）
   PLUGINS_VALIDATION_FAILED: 80001, // 插件域参数校验失败（#752 R8）
   PLUGIN_NOT_FOUND: 80040, // 插件不存在（目录外 id）/ 越权（同码防探测，#752 R8）
+  // 8xxxx skills 市场（#1055/#1056 · #1054 D1–D5）：01 校验段续号、41 不存在/越权同码防探测
+  //（对齐 80040 锁式；01 承载 zip 管线结构化拒收——reasons 数组进 data，非字段明细）
+  SKILL_PACKAGE_INVALID: 80002, // skill 包校验拒收（zip 管线 reasons[] / name 保留字 / 重名）
+  SKILL_NOT_FOUND: 80041, // skill 包不存在 / 越权（同码防探测）
   // 2xxxx 容器（#858 OpenClaw 退役③：容器行表/REST/管理页整体退役——除 20041 外全组
   // [退役保留] 码段防复用，对齐 90004 先例；无现役抛点）
   CONTAINER_NOT_FOUND: 20040, // [退役保留] 曾为容器不存在/越权（同码防探测，#312 锁）
@@ -128,6 +132,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.FIGURE_ARTIFACT_NOT_AVAILABLE]: 'Figure 产物不可用（生成渲染失败或产物缺失）',
   [CODE.PLUGINS_VALIDATION_FAILED]: '插件参数校验失败',
   [CODE.PLUGIN_NOT_FOUND]: '插件不存在',
+  [CODE.SKILL_PACKAGE_INVALID]: 'Skill 包校验未通过',
+  [CODE.SKILL_NOT_FOUND]: 'Skill 不存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',

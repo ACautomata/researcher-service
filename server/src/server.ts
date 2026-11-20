@@ -16,6 +16,7 @@ import { WikiUpdateRunService } from './wiki/updateRun'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
 import { AttachmentsService } from './attachments/service'
+import { SkillMarketService } from './skills/service'
 import { ATTACHMENT_TMP_DIR } from './attachments/values'
 import './types'
 import { PLUGIN_MANIFESTS } from '../../plugins/index'
@@ -48,6 +49,8 @@ async function main(): Promise<void> {
     tmpRoot: attachmentTmpRoot,
     archive: filesArchive,
   })
+  // #1056 Skill 市场服务（B 票 REST 消费 A 票管线 + 三表；D1 全员直发——权限矩阵在路由注释）。
+  const skillsMarket = new SkillMarketService({ prisma })
   const chaoxingOptions = readChaoxingOptions()
   const chaoxingRemote = !chaoxingOptions ? undefined : chaoxingOptions.transport === 'mcp'
     ? createChaoxingRemote(chaoxingOptions, mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}')))
@@ -166,6 +169,8 @@ async function main(): Promise<void> {
     attachments: { service: attachmentsService, tmpRoot: attachmentTmpRoot },
     // plugins（#788）：目录 + 启用位（/api/v1/plugins，8xxxx 段）。编译期目录注入。
     plugins: pluginsRouter,
+    // skills（#1056）：Skill 市场全件（/api/v1/skills）。SkillMarketService 单例注入。
+    skills: { service: skillsMarket },
   })
 
   const server = createServer(app)
