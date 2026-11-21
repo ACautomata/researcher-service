@@ -1,3 +1,5 @@
+import { createSessionHistoryTool, runWithHistoryContext } from '../historyTool'
+import type { SessionHistoryService } from '../../sessions/history/service'
 import { BackgroundExecService, withBackgroundRun, resultMessageId } from '../background/service'
 import type { BackgroundExec } from '../../generated/prisma/client'
 import { NextStepSuggestions } from '../../sessions/nextStepSuggestion'
@@ -181,6 +183,8 @@ export interface RunSnapshot {
 export type EventPublisher = Pick<StreamHub, 'publish'>
 
 export interface RunServiceDeps {
+  /** RF-T01 内部集成接缝；生产 assembly 不注入，等待 RF-T12 完整门禁。 */
+  readonly history?: Pick<SessionHistoryService, 'execute'>
   readonly background?: BackgroundExecService
   readonly chaoxing?: ChaoxingService
   readonly prisma: PrismaClient
@@ -305,6 +309,7 @@ interface PendingApproval extends Omit<RunEventContext, 'sessionId'> {
 // 归属 session）在调用点构造时显式化，不再靠位置参数暗传两遍。本地接口（调用点唯一、
 // getOrBuildGraph 私有）——不导出。
 interface GraphBuildContext {
+  readonly historyLeader: boolean
   readonly threadId: string
   readonly configVersion: number
   readonly policy: InterruptPolicy | undefined
@@ -975,6 +980,7 @@ export class RunService {
         })
       : this.getOrBuildGraph({
           threadId: cmd.sessionId,
+          historyLeader: !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId,
           configVersion: snapshot.version,
           policy,
           model,
@@ -1245,7 +1251,9 @@ export class RunService {
         // ctx 六件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
         const pluginFrame = await this.buildPluginRunFrame(cmd, labContainer, snapshot, controller.signal)
         await withBackgroundRun(cmd, controller.signal, () => runWithRunContext(cmd.runId, async () => {
-          await runWithPluginRunFrame(pluginFrame, async () => {
+          await runWithHistoryContext({ context: { ownerId: cmd.ownerId, currentSessionId: cmd.sessionId,
+            role: session.isTeammate || cmd.teammateId || cmd.parentSessionId ? 'teammate' : 'leader',
+          }, signal: controller.signal }, () => runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
               ...invocation,
               recursionLimit: this.recursionLimit,
@@ -1261,7 +1269,7 @@ export class RunService {
                 this.publish(cmd.ownerId, ev, cmd)
               }
             }
-          })
+          }))
         }))
         // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
         const state = await this.graphState(agent, cmd.sessionId)
@@ -2122,7 +2130,7 @@ export class RunService {
     // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
     // skill 目录版本入键（#1057）：启用集已在 capabilities.key（enabledSkillIds 并入），
     // 版本管「开着的 skill 长什么样」（id/name/sha256 稳定序 sha256）。
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}|history:${this.deps.history && ctx.historyLeader ? 'leader-v1' : 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     // #782 × #785 接缝：journaling 开启时 backendFor 产出打点装饰器（其 apply 经 putBuffer
@@ -2151,6 +2159,7 @@ export class RunService {
     const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
     const middleware = this.runtimeMiddleware(threadId)
     const agent = buildLeaderAgent({
+      ...(this.deps.history && ctx.historyLeader ? { historyTool: createSessionHistoryTool(this.deps.history) } : {}),
       model,
       backend: this.deps.background?.backend(backend, labContainer) ?? backend,
       checkpointer: this.deps.saver,

@@ -1,3 +1,4 @@
+import { SESSION_HISTORY_TOOL_NAME } from '../sessions/history/values'
 // 插件目录注册期强校验（#752 §2.2/§2.3/§5 · #788）：fail-fast——校验失败 = 启动失败
 //（编译期信任下无「装了一半」状态）。纯逻辑零 IO（接缝 S3）。
 //
@@ -56,7 +57,7 @@ function singleLine(value: string): boolean {
 export async function assertValidPluginCatalog(input: PluginCatalogValidationInput): Promise<void> {
   const seenIds = new Set<string>()
   const seenRunKinds = new Set<string>()
-  const seenToolNames = new Set<string>(input.coreToolNames ?? [])
+  const seenToolNames = new Set<string>([SESSION_HISTORY_TOOL_NAME, ...(input.coreToolNames ?? [])])
   const seenCommandNames = new Set<string>(input.reservedCommandNames ?? [])
   for (const manifest of input.manifests) {
     if (RESERVED_PLUGIN_IDS.has(manifest.id)) throw new Error(`Plugin id is reserved: ${manifest.id}`)

@@ -1,3 +1,4 @@
+import { parseProductObject as parseObject } from './productMessage'
 // story 64（#747 · R6 双栈不可逆缓解）：会话数据 → 中性格式 JSON 的映射纯函数。
 //
 // 规格（#747 B 节）：「中性导出离线脚本——从 session_messages 导出中性格式 JSON」；
@@ -52,19 +53,6 @@ export interface NeutralSessionExport {
     readonly forkSource?: Record<string, unknown>
   }
   readonly messages: readonly NeutralSessionMessage[]
-}
-
-// 防御解析（零信任）：非对象/数组根的 JSON 同样视为缺失（attachments 面只接受对象聚合）。
-function parseObject(raw: string): Record<string, unknown> | undefined {
-  try {
-    const v: unknown = JSON.parse(raw)
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      return v as Record<string, unknown>
-    }
-  } catch {
-    /* 非法 JSON → 省略 */
-  }
-  return undefined
 }
 
 export function buildNeutralSessionExport(
