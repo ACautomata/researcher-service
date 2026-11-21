@@ -315,6 +315,14 @@ CREATE TABLE IF NOT EXISTS "session_messages" (
     CONSTRAINT "session_messages_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- #1078 · RF-T02：历史读取变更版本（触发器见 prisma/history-triggers.sql）。
+-- 无外键：会话级联删除时消息删除触发器不得写已删父行。
+CREATE TABLE IF NOT EXISTS "session_history_versions" (
+    "sessionId" TEXT NOT NULL PRIMARY KEY,
+    "version" INTEGER NOT NULL DEFAULT 0,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS "checkpoints" (
     "threadId" TEXT NOT NULL,
     "checkpointNs" TEXT NOT NULL DEFAULT '',

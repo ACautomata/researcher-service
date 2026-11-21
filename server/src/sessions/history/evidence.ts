@@ -54,3 +54,66 @@ export function historyEvidence(sessionId: string, row: HistoryMessageRow): Hist
   else if (fields.hasExec !== undefined) missing.push('hasExec')
   return evidence
 }
+
+export interface EvidenceCursor {
+  region: 'content' | 'thinking' | 'fields'
+  offset: number
+  index: number
+}
+
+// 长区域分段游标：普通消息返回 undefined（整条一次交付）；长正文/思考按区域连续分段。
+export function startEvidenceCursor(evidence: HistoryEvidence, segmentChars: number): EvidenceCursor | undefined {
+  if (evidence.content.length <= segmentChars && (evidence.thinking?.length ?? 0) <= segmentChars) return undefined
+  if (evidence.content.length > 0) return { region: 'content', offset: 0, index: 1 }
+  if (evidence.thinking !== undefined) return { region: 'thinking', offset: 0, index: 1 }
+  return undefined
+}
+
+export function hasAttachedFields(evidence: HistoryEvidence): boolean {
+  return evidence.tools !== undefined || evidence.media !== undefined || evidence.files !== undefined ||
+    evidence.filesTotal !== undefined || evidence.hasExec !== undefined
+}
+
+// 取一个交付片段；maxChars=0 表示附属性字段段不切分。返回的 next 为空即消息交付完毕。
+export function takeEvidencePart(evidence: HistoryEvidence, cursor: EvidenceCursor, maxChars: number): {
+  part: HistoryEvidence
+  next?: EvidenceCursor
+} {
+  const base: HistoryEvidence = {
+    session_id: evidence.session_id, message_id: evidence.message_id, turn: evidence.turn, role: evidence.role,
+    created_at: evidence.created_at, content: '', missing: evidence.missing, source_truncated: evidence.source_truncated,
+  }
+  if (cursor.region === 'content') {
+    const total = evidence.content.length
+    const end = Math.min(total, cursor.offset + Math.max(1, maxChars))
+    const part: HistoryEvidence = { ...base, content: evidence.content.slice(cursor.offset, end),
+      segment: { region: 'content', index: cursor.index, start: cursor.offset, end, total, next: end < total },
+    }
+    if (end < total) return { part, next: { region: 'content', offset: end, index: cursor.index + 1 } }
+    return { part, ...nextRegionAfterContent(evidence, cursor.index) }
+  }
+  if (cursor.region === 'thinking') {
+    const text = evidence.thinking ?? ''
+    const total = text.length
+    const end = Math.min(total, cursor.offset + Math.max(1, maxChars))
+    const part: HistoryEvidence = { ...base, thinking: text.slice(cursor.offset, end),
+      segment: { region: 'thinking', index: cursor.index, start: cursor.offset, end, total, next: end < total },
+    }
+    if (end < total) return { part, next: { region: 'thinking', offset: end, index: cursor.index + 1 } }
+    return { part, ...(hasAttachedFields(evidence) ? { next: { region: 'fields' as const, offset: 0, index: 1 } } : {}) }
+  }
+  const part: HistoryEvidence = { ...base, attached_fields: true,
+    ...(evidence.tools !== undefined ? { tools: evidence.tools } : {}),
+    ...(evidence.media !== undefined ? { media: evidence.media } : {}),
+    ...(evidence.files !== undefined ? { files: evidence.files } : {}),
+    ...(evidence.filesTotal !== undefined ? { filesTotal: evidence.filesTotal } : {}),
+    ...(evidence.hasExec !== undefined ? { hasExec: evidence.hasExec } : {}),
+  }
+  return { part }
+}
+
+function nextRegionAfterContent(evidence: HistoryEvidence, index: number): { next?: EvidenceCursor } {
+  if (evidence.thinking !== undefined) return { next: { region: 'thinking', offset: 0, index: index + 1 } }
+  if (hasAttachedFields(evidence)) return { next: { region: 'fields', offset: 0, index: index + 1 } }
+  return {}
+}

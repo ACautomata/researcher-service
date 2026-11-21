@@ -156,6 +156,13 @@ CREATE TABLE "session_messages" (
 );
 
 -- CreateTable
+CREATE TABLE "session_history_versions" (
+    "sessionId" TEXT NOT NULL PRIMARY KEY,
+    "version" INTEGER NOT NULL DEFAULT 0,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
 CREATE TABLE "checkpoints" (
     "threadId" TEXT NOT NULL,
     "checkpointNs" TEXT NOT NULL DEFAULT '',

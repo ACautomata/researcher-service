@@ -379,6 +379,21 @@ model SessionMessage {
 }
 
 // ---------------------------------------------------------------------------
+// SessionHistoryVersion —— 历史读取变更版本（#1078 · RF-T02）。
+// 每会话一个计数，由 prisma/history-triggers.sql 的 SQLite 触发器在「旧内容/可见性
+// mutation」发生后与业务写入同事务递增：消息行 UPDATE/DELETE、归档行 INSERT、会话
+// archivedAt/isTeammate 变化。普通消息追加（archivedAt=null 的 INSERT）与标题/模型设置
+// 不递增——续读不因此失效。模型仅为 schema 权威登记；读写走历史域专用只读连接。
+// ---------------------------------------------------------------------------
+model SessionHistoryVersion {
+  sessionId String  @id
+  version   Int     @default(0)
+  updatedAt DateTime @default(now())
+
+  @@map("session_history_versions")
+}
+
+// ---------------------------------------------------------------------------
 // Checkpoint / CheckpointWrite —— LangGraph 机制数据（#727；自定义 PrismaCheckpointSaver
 // 五方法 put/putWrites/getTuple/list/deleteThread 的落点，#774 实现）。不暴露产品读。
 // 形状对齐 LangGraph checkpoint 存储惯例（thread_id / checkpoint_ns / checkpoint_id 三元组）。

@@ -25,6 +25,8 @@ import { runIncrementalSchema, runT0LegacyCleanup } from './lib/incremental-sche
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const sql = readFileSync(path.join(here, '..', 'prisma', 'init.sql'), 'utf8')
+// #1078：历史读取变更版本触发器（SQL 含 BEGIN…END 分号，整文件 exec）。
+const triggersSql = readFileSync(path.join(here, '..', 'prisma', 'history-triggers.sql'), 'utf8')
 const url = process.env.DATABASE_URL ?? 'file:./prisma/panel.db'
 const dbPath = url.replace(/^file:/, '')
 
@@ -65,6 +67,7 @@ try {
     db.exec(stmt.sql)
   }
   runIncrementalSchema(db)
+  db.exec(triggersSql)
 } finally {
   db.close()
 }

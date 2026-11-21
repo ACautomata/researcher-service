@@ -135,8 +135,10 @@ describe('session_history（RF-T01）', () => {
     const result = await broken.execute(context, { operation: 'search' })
     expect(result).toMatchObject({ outcome: 'failure', progress: 'stopped', error: { category: 'system' } })
     expect(JSON.stringify(result)).not.toMatch(/should-not-exist|SELECT|stack|SQLITE/)
-    const bounded = new SessionHistoryService(new SqliteHistoryReader(app.dbUrl.slice(5), { sessions: 100, messages: 0, bytes: 1 }))
-    expect(await bounded.execute(context, { operation: 'read', targets: [{ session_id: 'old' }] })).toMatchObject({ progress: 'stopped', error: { category: 'limit' }, groups: [{ status: 'incomplete' }] })
+    const bounded = new SessionHistoryService(new SqliteHistoryReader(app.dbUrl.slice(5)), { scanMessages: 0 })
+    expect(await bounded.execute(context, { operation: 'read', targets: [{ session_id: 'old' }] })).toMatchObject({
+      progress: 'stopped', groups: [{ status: 'reading' }], cursor: expect.any(String),
+    })
     const small = new SessionHistoryService(new SqliteHistoryReader(app.dbUrl.slice(5)), { maxResponseBytes: 600 })
     expect(await small.execute(context, { operation: 'read', targets: [{ session_id: 'old' }] })).toMatchObject({ progress: 'stopped', error: { code: 'response_limit' } })
   })
@@ -166,7 +168,7 @@ describe('session_history（RF-T01）', () => {
   })
 
   it('M3：业务核心不导入数据库/REST/图/执行器，不调用投影或 checkpoint', () => {
-    for (const file of ['model', 'service', 'evidence', 'matcher', 'params', 'regex']) {
+    for (const file of ['model', 'service', 'evidence', 'matcher', 'params', 'regex', 'cursor']) {
       const source = readFileSync(`src/sessions/history/${file}.ts`, 'utf8')
       expect(source).not.toMatch(/from ['"].*(?:prisma|express|langgraph|better-sqlite3|worker_threads|sqliteReader)/i)
       expect(source).not.toMatch(/getProjection\(|checkpoint.*blob/i)

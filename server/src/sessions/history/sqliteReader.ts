@@ -1,54 +1,128 @@
 // 外层适配：专用只读连接，可信装配传路径；SQL 参数化、授权与读取同事务。
 // RF-T03 将接入独立可硬终止执行器；此适配尚不对生产开放。
 import Database from 'better-sqlite3'
-import type { HistoryContext, HistoryReader, HistoryReadTarget, HistorySession, HistorySnapshot } from './model'
+import {
+  HistoryDenied,
+  type HistoryContext,
+  type HistoryMessageRow,
+  type HistoryPosition,
+  type HistoryReader,
+  type HistoryScan,
+  type HistoryScanOptions,
+  type HistorySessionMeta,
+} from './model'
 
-interface SessionRow { id: string; title: string; createdAt: number | string; latestMessageAt: number | string }
+interface SessionRow { id: string; title: string; createdAt: number | string; latestMessageAt: number | string; version: number | null }
+interface UpperRow { sessionId: string; turn: number; createdAt: number | string; id: string }
+interface CandidateRow { id: string; turn: number; bytes: number }
 interface MessageRow { id: string; turn: number; role: string; content: string; attachmentsJson: string; createdAt: number | string }
+
 // SQLite CURRENT_TIMESTAMP 是无时区的 UTC 文本；Prisma 则写毫秒数。
 const iso = (v: number | string): string => new Date(typeof v === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(v) ? `${v.replace(' ', 'T')}Z` : v).toISOString()
 const milliseconds = (column: string): string => `CASE WHEN typeof(${column}) IN ('integer','real') THEN ${column} ELSE unixepoch(${column},'subsec')*1000 END`
+const positionOf = (row: { turn: number; createdAt: number | string; id: string }): HistoryPosition => ({
+  turn: row.turn, createdAt: iso(row.createdAt), id: row.id,
+})
+const positionArgs = (position: HistoryPosition): [number, number, string] => [position.turn, Date.parse(position.createdAt), position.id]
+// 行值比较与 SQL 排序键同构：(turn, ms(createdAt), id)。
+const afterSql = (column: string) => `(${column}.turn, ${milliseconds(`${column}.createdAt`)}, ${column}.id) > (?,?,?)`
+const beforeSql = (column: string) => `(${column}.turn, ${milliseconds(`${column}.createdAt`)}, ${column}.id) < (?,?,?)`
+const upToSql = (column: string) => `(${column}.turn, ${milliseconds(`${column}.createdAt`)}, ${column}.id) <= (?,?,?)`
 
 export class SqliteHistoryReader implements HistoryReader {
-  constructor(private readonly dbPath: string, private readonly limits = { sessions: 1000, messages: 1000, bytes: 8 * 1024 * 1024 }) {}
+  constructor(
+    private readonly dbPath: string,
+    private readonly limits = { sessions: 1000 },
+  ) {}
 
-  read(context: HistoryContext, sessionIds?: readonly string[], targets?: readonly HistoryReadTarget[]): HistorySnapshot {
-    return withHistoryReadConnection(this.dbPath, db => db.transaction(() => {
-        // 复核可信调用身份：停用/删除用户、当前线程归属异常均 fail closed。
-        const caller = db.prepare(`SELECT s.id FROM sessions s JOIN users u ON u.id=s.ownerId
-          WHERE s.id=? AND s.ownerId=? AND s.isTeammate=0 AND s.archivedAt IS NULL AND u.isActive=1`)
-          .get(context.currentSessionId, context.ownerId)
-        if (!caller) throw new Error('history authorization unavailable')
-        const rows = db.prepare(`SELECT s.id,s.title,s.createdAt,
-          COALESCE((SELECT MAX(${milliseconds('m.createdAt')}) FROM session_messages m WHERE m.sessionId=s.id AND m.archivedAt IS NULL),${milliseconds('s.createdAt')}) AS latestMessageAt
-          FROM sessions s WHERE s.ownerId=? AND s.id<>? AND s.archivedAt IS NULL AND s.isTeammate=0
-          ${sessionIds ? `AND s.id IN (${sessionIds.map(() => '?').join(',')})` : ''}
-          ORDER BY latestMessageAt DESC,s.id ASC LIMIT ?`)
-          .all(context.ownerId, context.currentSessionId, ...(sessionIds ?? []), this.limits.sessions + 1) as SessionRow[]
-        let remaining = this.limits.messages
-        let bytes = this.limits.bytes
-        const sessions: HistorySession[] = []
-        for (const row of rows.slice(0, this.limits.sessions)) {
-          const messages: HistorySession['messages'] = []
-          let limited = false
-          // 先读长度，避免无界加载正文和聚合。真正分段/续读由 RF-T02 实现。
-          const ranges = targets?.filter(t => t.session_id === row.id)
-          const rangeFilter = ranges?.length ? `AND (${ranges.map(() => '(turn>=? AND turn<=?)').join(' OR ')})` : ''
-          const rangeArgs = ranges?.flatMap(t => [t.range?.from_turn ?? 1, t.range?.to_turn ?? Number.MAX_SAFE_INTEGER]) ?? []
-          const candidates = db.prepare(`SELECT id,length(CAST(content AS BLOB))+length(CAST(attachmentsJson AS BLOB)) AS bytes
-            FROM session_messages WHERE sessionId=? AND archivedAt IS NULL ${rangeFilter} ORDER BY turn,${milliseconds('createdAt')},id LIMIT ?`)
-            .all(row.id, ...rangeArgs, remaining + 1) as { id: string; bytes: number }[]
-          for (const candidate of candidates) {
-            if (remaining <= 0 || candidate.bytes > bytes) { limited = true; break }
-            const m = db.prepare('SELECT id,turn,role,content,attachmentsJson,createdAt FROM session_messages WHERE id=?').get(candidate.id) as MessageRow
-            messages.push({ ...m, createdAt: iso(m.createdAt) })
-            remaining--; bytes -= candidate.bytes
-          }
-          sessions.push({ ...row, createdAt: iso(row.createdAt), latestMessageAt: iso(row.latestMessageAt), messages, limited })
-        }
-        return { sessions, limited: rows.length > this.limits.sessions || sessions.some(s => s.limited) }
-      })())
+  sessions(context: HistoryContext, options: { sessionIds?: readonly string[] } = {}): HistorySessionMeta[] {
+    return this.readDb(db => {
+      requireCaller(db, context)
+      const ids = options.sessionIds ? [...options.sessionIds] : undefined
+      const rows = db.prepare(`SELECT s.id,s.title,s.createdAt,COALESCE(v.version,0) AS version,
+        COALESCE((SELECT MAX(${milliseconds('m.createdAt')}) FROM session_messages m WHERE m.sessionId=s.id AND m.archivedAt IS NULL),${milliseconds('s.createdAt')}) AS latestMessageAt
+        FROM sessions s LEFT JOIN session_history_versions v ON v.sessionId=s.id
+        WHERE s.ownerId=? AND s.id<>? AND s.archivedAt IS NULL AND s.isTeammate=0
+        ${ids ? `AND s.id IN (${ids.map(() => '?').join(',')})` : ''}
+        ORDER BY latestMessageAt DESC,s.id ASC LIMIT ?`)
+        .all(context.ownerId, context.currentSessionId, ...(ids ?? []), this.limits.sessions) as SessionRow[]
+      const uppers = rows.length
+        ? db.prepare(`SELECT sessionId,turn,createdAt,id FROM (
+            SELECT m.sessionId,m.turn,m.createdAt,m.id,
+              ROW_NUMBER() OVER (PARTITION BY m.sessionId ORDER BY m.turn DESC,${milliseconds('m.createdAt')} DESC,m.id DESC) AS rn
+            FROM session_messages m WHERE m.archivedAt IS NULL AND m.sessionId IN (${rows.map(() => '?').join(',')})
+          ) WHERE rn=1`).all(...rows.map(row => row.id)) as UpperRow[]
+        : []
+      const upperById = new Map(uppers.map(row => [row.sessionId, positionOf(row)]))
+      return rows.slice(0, this.limits.sessions).map(row => ({
+        id: row.id,
+        title: row.title,
+        createdAt: iso(row.createdAt),
+        latestMessageAt: iso(row.latestMessageAt),
+        version: row.version ?? 0,
+        ...(upperById.has(row.id) ? { upper: upperById.get(row.id) } : {}),
+      }))
+    })
   }
+
+  scan(context: HistoryContext, sessionId: string, options: HistoryScanOptions): HistoryScan {
+    return this.readDb(db => {
+      requireCaller(db, context)
+      requireReadable(db, context, sessionId)
+      const conditions = ['m.sessionId=?', 'm.archivedAt IS NULL']
+      const args: (string | number)[] = [sessionId]
+      if (options.range?.from_turn !== undefined) { conditions.push('m.turn>=?'); args.push(options.range.from_turn) }
+      if (options.range?.to_turn !== undefined) { conditions.push('m.turn<=?'); args.push(options.range.to_turn) }
+      if (options.time?.from !== undefined) { conditions.push(`${milliseconds('m.createdAt')}>=?`); args.push(Date.parse(options.time.from)) }
+      if (options.time?.to !== undefined) { conditions.push(`${milliseconds('m.createdAt')}<?`); args.push(Date.parse(options.time.to)) }
+      if (options.after) { conditions.push(afterSql('m')); args.push(...positionArgs(options.after)) }
+      if (options.upTo) { conditions.push(upToSql('m')); args.push(...positionArgs(options.upTo)) }
+      if (options.before) { conditions.push(beforeSql('m')); args.push(...positionArgs(options.before)) }
+      const descending = options.before !== undefined
+      const candidates = db.prepare(`SELECT m.id,m.turn,length(CAST(m.content AS BLOB))+length(CAST(m.attachmentsJson AS BLOB)) AS bytes
+        FROM session_messages m WHERE ${conditions.join(' AND ')}
+        ORDER BY m.turn ${descending ? 'DESC' : 'ASC'},${milliseconds('m.createdAt')} ${descending ? 'DESC' : 'ASC'},m.id ${descending ? 'DESC' : 'ASC'}
+        LIMIT ?`).all(...args, options.limitMessages + 1) as CandidateRow[]
+      if (descending) candidates.reverse()
+      const messages: HistoryMessageRow[] = []
+      let bytes = options.limitBytes
+      let limited = false
+      let truncatedByCount = false
+      for (const candidate of candidates) {
+        if (messages.length >= options.limitMessages) { truncatedByCount = true; break }
+        // 单条超预算仍交付一条，业务层按区域分段推进；否则小预算永远无法到达长消息。
+        if (candidate.bytes > bytes && messages.length > 0) { limited = true; break }
+        const row = db.prepare('SELECT id,turn,role,content,attachmentsJson,createdAt FROM session_messages WHERE id=?').get(candidate.id) as MessageRow
+        messages.push({ ...row, createdAt: iso(row.createdAt) })
+        bytes -= candidate.bytes
+      }
+      const hasMore = limited || truncatedByCount || (candidates.length > messages.length && !descending)
+      return {
+        messages,
+        ...(messages.length ? { next: positionOf(messages[messages.length - 1]!) } : {}),
+        hasMore,
+        limited,
+      }
+    })
+  }
+
+  private readDb<T>(read: (db: Database.Database) => T): T {
+    return withHistoryReadConnection(this.dbPath, db => db.transaction(() => read(db))())
+  }
+}
+
+function requireCaller(db: Database.Database, context: HistoryContext): void {
+  const caller = db.prepare(`SELECT s.id FROM sessions s JOIN users u ON u.id=s.ownerId
+    WHERE s.id=? AND s.ownerId=? AND s.isTeammate=0 AND s.archivedAt IS NULL AND u.isActive=1`)
+    .get(context.currentSessionId, context.ownerId)
+  if (!caller) throw new HistoryDenied('authorization')
+}
+
+function requireReadable(db: Database.Database, context: HistoryContext, sessionId: string): void {
+  if (sessionId === context.currentSessionId) throw new HistoryDenied('current_session')
+  const row = db.prepare(`SELECT 1 FROM sessions s WHERE s.id=? AND s.ownerId=? AND s.archivedAt IS NULL AND s.isTeammate=0`)
+    .get(sessionId, context.ownerId)
+  if (!row) throw new HistoryDenied('unreadable')
 }
 
 // 真实 adapter 接缝：连接层强制只读；测试可验证误写失败及 finally 释放。
