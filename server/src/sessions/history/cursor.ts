@@ -60,7 +60,7 @@ export class HistoryCursorStore {
 
   put(state: Omit<CursorStateBase, 'deadline'> & { operation: CursorState['operation']; targets?: ReadTargetProgress[]; search?: SearchCursorData }): CursorPutResult {
     const now = this.clock()
-    this.cleanup(now)
+    this.sweep(now)
     if (Buffer.byteLength(JSON.stringify(state), 'utf8') > this.limits.maxStateBytes) return { ok: false, reason: 'state_limit' }
     let userCount = 0
     for (const entry of this.states.values()) if (entry.ownerId === state.ownerId) userCount++
@@ -75,7 +75,7 @@ export class HistoryCursorStore {
   // 篡改 / 跨用户 / 跨会话 / 换条件 / 过期 / 重启 → 同形拒绝。
   get(token: string, context: { ownerId: string; currentSessionId: string; operation: string }, requestHash: string): CursorState | undefined {
     const now = this.clock()
-    this.cleanup(now)
+    this.sweep(now)
     const state = this.states.get(token)
     if (!state) return undefined
     if (state.deadline < now || state.ownerId !== context.ownerId || state.currentSessionId !== context.currentSessionId ||
@@ -87,7 +87,12 @@ export class HistoryCursorStore {
     this.states.delete(token)
   }
 
-  private cleanup(now: number): void {
+  // 启动即扫 + 每分钟 TTL 清理（服务 dispose 时随定时器停止；clear 一并释放内存）。
+  sweep(now: number): void {
     for (const [token, state] of this.states) if (state.deadline < now) this.states.delete(token)
+  }
+
+  clear(): void {
+    this.states.clear()
   }
 }

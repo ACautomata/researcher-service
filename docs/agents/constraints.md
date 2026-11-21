@@ -26,4 +26,8 @@
     Redis（门控）。（#858：fleet 编排 smoke 与 BullMQ 生命周期队列用例随容器管理退役。）
     历史检索（#1077/#1078）走 S1/S4：真实临时 SQLite + 公共 `execute` 口 + 真实只读适配器；
     `prisma/history-triggers.sql` 由 `db:apply` 与 `test/setup.ts` 同源执行，维护会话历史变更版本。
+    #1079 起执行上限走真实子进程执行器（`ProcessHistoryReader` + `sqliteCore.cjs`）：
+    硬停止以 SIGKILL 子进程证明，不用 Promise.race；主请求额度账本落 `history_request_budgets`
+    （requestId = 可信 triggerMessageId，独立于 runId）。SQL 真源只在 `sqliteCore.cjs`，
+    `SqliteHistoryReader` 与执行子进程共用。
   - frontend：`cd frontend && npm run test`（vitest）；`npm run build` 跑 vue-tsc 类型检查。

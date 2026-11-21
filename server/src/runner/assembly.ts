@@ -71,6 +71,8 @@ export async function assembleRunner(opts: {
   ensureSandbox?: (sessionId: string) => Promise<{ containerId: string }>
   /** 插件运行时（#788；测试注入覆盖缺省目录装配——V1 目录为空时缺省装配即 no-op 面） */
   plugins?: PluginRuntime
+  /** #1079 历史增强运行时（RF-T12 完整门禁前生产不注入；装配处唯一接缝）。 */
+  history?: RunServiceDeps['history']
 }): Promise<RunnerAssembly> {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -229,6 +231,7 @@ export async function assembleRunner(opts: {
     downloadNode,
     fileJournal,
     plugins,
+    ...(opts.history ? { history: opts.history } : {}),
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 

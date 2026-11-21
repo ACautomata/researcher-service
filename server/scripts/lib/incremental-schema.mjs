@@ -15,8 +15,9 @@
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
 // minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）；
 // 18→19 #1046 durable background_execs + #1055 Skill 市场三表（均 additive：background_execs /
-// skill_packages/skill_files/skill_enablements）。
-export const SCHEMA_VERSION = 19
+// skill_packages/skill_files/skill_enablements）；
+// 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）。
+export const SCHEMA_VERSION = 20
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -169,6 +170,26 @@ CREATE TABLE IF NOT EXISTS "figures" (
   }
   db.exec('DROP TABLE IF EXISTS "generation_jobs"')
   db.exec(`CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId")`)
+
+  // #1079（19→20）：历史主请求额度账本（additive，DDL 镜像 prisma/init.sql）。
+  // requestId = 可信 triggerMessageId；resume/recover 经本行延续，不重新发放额度。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "history_request_budgets" (
+    "requestId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "lastRunId" TEXT NOT NULL,
+    "calls" INTEGER NOT NULL DEFAULT 0,
+    "waitedMs" INTEGER NOT NULL DEFAULT 0,
+    "returnedBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "history_request_budgets_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "history_request_budgets_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS "history_request_budgets_sessionId_updatedAt_idx" ON "history_request_budgets"("sessionId", "updatedAt");
+CREATE INDEX IF NOT EXISTS "history_request_budgets_ownerId_updatedAt_idx" ON "history_request_budgets"("ownerId", "updatedAt");
+`)
 
   // ---- T0 #801 legacy 清退（先 DROP 后 CREATE：本段须在 model_providers 新形状 CREATE
   // 与 minimax seed 之前执行）----

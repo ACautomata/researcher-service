@@ -65,6 +65,7 @@ model User {
   chaoxingAuthorizations ChaoxingAuthorization[]
   pluginEnablements PluginEnablement[]
   pluginLlmAssignments PluginLlmAssignment[]
+  historyRequestBudgets HistoryRequestBudget[]
 
   @@map("users")
 }
@@ -261,6 +262,7 @@ model Session {
   teammateMessages TeammateMailboxMessage[]
   teammateMailboxParentWaits TeammateMailboxWait[] @relation("MailboxWaitParent")
   teammateMailboxThreadWait TeammateMailboxWait? @relation("MailboxWaitThread")
+  historyRequestBudgets HistoryRequestBudget[]
 
   @@index([ownerId])
   @@map("sessions")
@@ -391,6 +393,30 @@ model SessionHistoryVersion {
   updatedAt DateTime @default(now())
 
   @@map("session_history_versions")
+}
+
+// ---------------------------------------------------------------------------
+// HistoryRequestBudget —— 稳定主请求的历史检索额度账本（#1079 · RF-T03）。
+// requestId = 可信 triggerMessageId（用户消息行 id），与可重建的 runId 分离；resume/recover
+// 经本行延续，不重新发放。calls 在 reserve 时计入（失败/重试也算），bytes/waitedMs 交付前
+// settle；行是「最小累计计量」，不含查询正文或书签。
+// ---------------------------------------------------------------------------
+model HistoryRequestBudget {
+  requestId    String   @id
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId     String
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId   String
+  lastRunId   String
+  calls       Int      @default(0)
+  waitedMs    Int      @default(0)
+  returnedBytes Int    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([sessionId, updatedAt])
+  @@index([ownerId, updatedAt])
+  @@map("history_request_budgets")
 }
 
 // ---------------------------------------------------------------------------
