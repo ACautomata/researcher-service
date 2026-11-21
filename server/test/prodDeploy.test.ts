@@ -132,7 +132,9 @@ describe('CD 工作流（issue #593，ADR 0013；#858 后无模板注入）', ()
     expect(preload).toMatch(/steps\.pull\.outcome == 'failure'/)
     expect(preload).toMatch(/docker pull "\$SERVER_IMAGE:\$IMAGE_TAG"/)
     expect(preload).toMatch(/docker save "\$SERVER_IMAGE:latest"/)
-    expect(preload).toMatch(/'docker load'/)
+    expect(preload).toMatch(/docker load/)
+    expect(preload).toMatch(/gzip -1/)
+    expect(preload).toMatch(/exceeded 15m/)
 
     const deployStep = cd.split('Deploy over SSH (up')[1]
     expect(deployStep, 'cd.yml 缺部署步骤').toBeDefined()
