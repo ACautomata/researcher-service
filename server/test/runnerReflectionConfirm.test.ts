@@ -201,8 +201,9 @@ describe('#1081 反思确认授权：真实图无自批通道', () => {
     expect(await prisma.reflectionRecord.count({ where: { ownerId: owner.id } })).toBe(0)
     const active = models.find((m) => m.invokeCount > 0)
     expect(active, '应至少调用一次模型').toBeDefined()
-    const secondCall = active!.receivedMessages[1] as Array<{ content: unknown }> | undefined
-    const toolText = secondCall!.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')
+    const secondCall = active!.receivedMessages[1] as Array<{ content: unknown; tool_call_id?: string }> | undefined
+    const toolMessage = secondCall!.find((m) => m.tool_call_id === 'call-commit-2')
+    const toolText = JSON.stringify(toolMessage)
     expect(toolText).toContain('confirmation_required')
     expect(toolText).not.toContain('record_id')
   })

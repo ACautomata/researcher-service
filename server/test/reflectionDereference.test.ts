@@ -22,12 +22,15 @@ describe('#1080 模型输入解引用（RF21）', () => {
   const middleware = createReflectionDereferenceMiddleware({
     displayBodyText: async (_ownerId, displayId) => (displayId === 'disp-1' ? LONG_BODY : null),
     draftBodyText: async (_ownerId, draftId, version) => (draftId === 'draft-1' && version === 3 ? '【草稿正文】' + LONG_BODY : null),
+    recordBodyText: async (_context, recordId, version) => (recordId === 'rec-001' && version === 2 ? '【记录正文】' + LONG_BODY : null),
   })
 
   const frame = {
     context: { ownerId: 'u1', currentSessionId: 's1', role: 'leader' as const, runId: 'r1' },
     signal: new AbortController().signal,
     presentations: [],
+    authorizedRecords: new Set(['rec-001:2']),
+    authorizedDrafts: new Set(['draft-1:3']),
   }
 
   it('克隆消息后展开展示正文交给模型，原消息保持引用不变', async () => {
@@ -86,5 +89,35 @@ describe('#1080 模型输入解引用（RF21）', () => {
       })
     })
     expect(received).toBe('reflection_display:gone')
+  })
+
+  it('草稿正文只展开本轮 management read 授权过的引用；自填草稿引用保持占位', async () => {
+    const fabricated = new HumanMessage('草稿 reflection_draft:draft-2:1')
+    let received: unknown
+    await runWithReflectionContext(frame, async () => {
+      await (middleware as unknown as {
+        wrapModelCall: (req: unknown, handler: (req: unknown) => unknown) => Promise<unknown>
+      }).wrapModelCall(requestWith([fabricated]), (req: unknown) => {
+        received = (req as { messages: HumanMessage[] }).messages[0].content
+        return { ok: true }
+      })
+    })
+    expect(received).toBe('草稿 reflection_draft:draft-2:1')
+  })
+
+  it('记录正文只展开本轮 read 授权过的引用；模型自填引用保持占位', async () => {
+    const authorized = new HumanMessage('记录 reflection_record:rec-001:2')
+    const fabricated = new HumanMessage('记录 reflection_record:rec-009:1')
+    let received: unknown[] = []
+    await runWithReflectionContext(frame, async () => {
+      await (middleware as unknown as {
+        wrapModelCall: (req: unknown, handler: (req: unknown) => unknown) => Promise<unknown>
+      }).wrapModelCall(requestWith([authorized, fabricated]), (req: unknown) => {
+        received = (req as { messages: HumanMessage[] }).messages.map((m) => m.content)
+        return { ok: true }
+      })
+    })
+    expect(String(received[0])).toContain('记录正文')
+    expect(received[1]).toBe('记录 reflection_record:rec-009:1')
   })
 })

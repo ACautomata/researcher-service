@@ -29,5 +29,7 @@
     #1079 起执行上限走真实子进程执行器（`ProcessHistoryReader` + `sqliteCore.cjs`）：
     硬停止以 SIGKILL 子进程证明，不用 Promise.race；主请求额度账本落 `history_request_budgets`
     （requestId = 可信 triggerMessageId，独立于 runId）。SQL 真源只在 `sqliteCore.cjs`，
-    `SqliteHistoryReader` 与执行子进程共用。
+    `SqliteHistoryReader` 与执行子进程共用。子进程/执行槽原语在 `utils/leasedProcessPool.ts`
+    + `utils/readonlyProcessChild.cjs`，反思记录检索（#1082，`reflectionCore.cjs`）复用同一护栏
+    但使用独立池与配额（每用户 1 / 全局 4、独立 `reflection_request_budgets`）。
   - frontend：`cd frontend && npm run test`（vitest）；`npm run build` 跑 vue-tsc 类型检查。

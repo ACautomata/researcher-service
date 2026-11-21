@@ -4,6 +4,7 @@ import { createReflectionTool } from '../reflectionTool'
 import { createReflectionConfirmationClassifier } from '../reflectionConfirmation'
 import { runWithReflectionContext, type ReflectionRunContext } from '../reflectionFrame'
 import { createReflectionDereferenceMiddleware } from '../reflectionDereference'
+import { hasReflectionManagementIntent } from '../reflectionManagementIntent'
 import type { ReflectionsPort } from '../../reflections/runtime'
 import { BackgroundExecService, withBackgroundRun, resultMessageId } from '../background/service'
 import type { BackgroundExec } from '../../generated/prisma/client'
@@ -910,7 +911,7 @@ export class RunService {
     }
 
     // #1080 RF-T04：reflections 仅主 Leader 图装配（teammate / 子线程 / 系统命令不接）。
-    const reflectionsLeader = this.deps.reflections !== undefined &&
+    let reflectionsLeader = this.deps.reflections !== undefined &&
       !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
     // #1081 RF-T05 · 基础 RF19：resume/recover 命令不带 triggerMessageId，从持久会话恢复稳定主请求
     // 身份——interrupted/suspended 期间新主请求被拒，最新用户消息即原触发消息；恢复不新建身份。
@@ -926,6 +927,24 @@ export class RunService {
         select: { id: true },
       })
       reflectionTriggerMessageId = lastUser?.id
+    }
+    // #1082：记录检索额度绑定稳定主请求；无法解析身份即关闭记录增强，不重新发放额度。
+    if (reflectionsLeader && this.deps.reflections?.requiresRequestIdentity && reflectionTriggerMessageId === undefined) {
+      reflectionsLeader = false
+    }
+    // 管理读取需要可信用户管理意图：只从真实触发用户消息判定，模型 purpose 参数不能授予。
+    let reflectionManagementIntent = false
+    if (reflectionsLeader && reflectionTriggerMessageId !== undefined) {
+      try {
+        const trigger = await this.deps.prisma.sessionMessage.findFirst({
+          where: { id: reflectionTriggerMessageId, sessionId: cmd.sessionId, role: 'user', archivedAt: null },
+          select: { content: true },
+        })
+        reflectionManagementIntent = trigger ? hasReflectionManagementIntent(trigger.content) : false
+      } catch {
+        // 意图判定故障不阻断原任务；管理读取保持关闭（fail closed）。
+        reflectionManagementIntent = false
+      }
     }
 
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
@@ -1345,10 +1364,13 @@ export class RunService {
                 currentSessionId: cmd.sessionId,
                 role: 'leader',
                 runId: cmd.runId,
-                ...(reflectionTriggerMessageId ? { triggerMessageId: reflectionTriggerMessageId } : {}),
+                ...(reflectionTriggerMessageId ? { triggerMessageId: reflectionTriggerMessageId, requestId: reflectionTriggerMessageId } : {}),
+                ...(reflectionManagementIntent ? { managementIntent: true } : {}),
               },
               signal: controller.signal,
               presentations: [],
+              authorizedRecords: new Set<string>(),
+              authorizedDrafts: new Set<string>(),
             }
           : undefined
         reflectionFrame = reflectionFrameLocal

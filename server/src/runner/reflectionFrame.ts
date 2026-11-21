@@ -11,6 +11,10 @@ export interface ReflectionRunContext {
   readonly signal: AbortSignal
   /** 本轮 present 成功的展示引用：recordTurn 统一接缝写入终态 assistant 消息并绑定展示。 */
   readonly presentations: PresentationRef[]
+  /** 本轮 read 授权过的记录正文引用（`recordId:version`）：解引用只展开这些引用。 */
+  readonly authorizedRecords: Set<string>
+  /** 本轮 management read 授权过的草稿正文引用（`draftId:version`）。 */
+  readonly authorizedDrafts: Set<string>
 }
 
 const storage = new AsyncLocalStorage<ReflectionRunContext>()

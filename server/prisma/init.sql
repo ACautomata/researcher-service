@@ -484,18 +484,6 @@ CREATE TABLE "reflection_presentations" (
 );
 
 -- CreateTable
-CREATE TABLE "reflection_events" (
-    "seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    "ownerId" TEXT NOT NULL,
-    "objectId" TEXT NOT NULL,
-    "action" TEXT NOT NULL,
-    "version" INTEGER,
-    "result" TEXT NOT NULL,
-    "category" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- CreateTable
 CREATE TABLE "reflection_records" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
@@ -548,6 +536,31 @@ CREATE TABLE "reflection_idempotency" (
     "ownerId" TEXT NOT NULL,
     "recordId" TEXT NOT NULL,
     "resultJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "reflection_request_budgets" (
+    "requestId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "lastRunId" TEXT NOT NULL,
+    "calls" INTEGER NOT NULL DEFAULT 0,
+    "waitedMs" INTEGER NOT NULL DEFAULT 0,
+    "returnedBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
+CREATE TABLE "reflection_events" (
+    "seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "ownerId" TEXT NOT NULL,
+    "objectId" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "version" INTEGER,
+    "result" TEXT NOT NULL,
+    "category" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -708,9 +721,6 @@ CREATE INDEX "reflection_presentations_ownerId_draftId_idx" ON "reflection_prese
 CREATE INDEX "reflection_presentations_sessionId_idx" ON "reflection_presentations"("sessionId");
 
 -- CreateIndex
-CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
-
--- CreateIndex
 CREATE INDEX "reflection_records_ownerId_status_idx" ON "reflection_records"("ownerId", "status");
 
 -- CreateIndex
@@ -720,11 +730,17 @@ CREATE INDEX "reflection_records_ownerId_updatedAt_idx" ON "reflection_records"(
 CREATE UNIQUE INDEX "reflection_revisions_recordId_version_key" ON "reflection_revisions"("recordId", "version");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");
-
--- CreateIndex
 CREATE INDEX "reflection_grants_ownerId_draftId_status_idx" ON "reflection_grants"("ownerId", "draftId", "status");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");
+
+-- CreateIndex
 CREATE INDEX "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "reflection_request_budgets_ownerId_sessionId_idx" ON "reflection_request_budgets"("ownerId", "sessionId");
+
+-- CreateIndex
+CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
 

@@ -20,6 +20,10 @@ export interface ReflectionContext {
   readonly runId?: string
   /** 可信触发用户消息行 id（稳定主请求身份）：确认授权与幂等提交只认这一条。 */
   readonly triggerMessageId?: string
+  /** 记录检索主请求额度身份（= 可信 triggerMessageId；缺失即停止增强，不重发额度）。 */
+  readonly requestId?: string
+  /** 可信用户管理意图（由服务端从真实用户消息判定，不由模型 purpose 参数授予）。 */
+  readonly managementIntent?: boolean
 }
 
 // ---- 内容（五部分）----
@@ -224,6 +228,110 @@ export type CommitOutcome =
   | { readonly result: CommitResult; readonly idempotent: boolean }
   | { readonly error: 'not_found' | 'revoked' | 'expired' | 'limit' | 'conflict' }
 
+// ---- 记录检索（#1082・RF-T06）----
+
+export type ReflectionPurpose = 'experience' | 'management'
+
+export interface RecordSummary {
+  readonly record_id: string
+  readonly version: number
+  readonly title: string
+  readonly category: string
+  readonly scope_labels: readonly string[]
+  readonly status: string
+  readonly evidence_status: string
+  readonly updated_at: string
+}
+
+export interface RecordTargetResult {
+  readonly record_id?: string
+  readonly draft_id?: string
+  readonly status: string
+  readonly version?: number
+  readonly is_current?: boolean
+  readonly title?: string
+  readonly category?: string
+  readonly scope_labels?: readonly string[]
+  readonly record_status?: string
+  readonly evidence_status?: string
+  readonly updated_at?: string
+  readonly body_ref?: string
+  readonly expected_version?: number
+  readonly actual_version?: number
+  readonly evidence?: readonly Record<string, unknown>[]
+  readonly evidence_omitted?: boolean
+}
+
+// ---- 记录检索端口（#1082・RF-T06；内层只依赖本接口，SQLite/子进程在外层适配）----
+
+export interface RecordSearchCriteria {
+  readonly words: readonly string[]
+  readonly labels: readonly string[]
+  readonly category?: string
+  readonly states: readonly string[]
+  readonly evidenceStatuses: readonly string[]
+  readonly maxRecords: number
+}
+
+export interface ReflectionRecordRead {
+  readonly record_id: string
+  readonly status: 'ok' | 'not_found' | 'unreadable' | 'conflict' | 'deleted'
+  readonly expected_version?: number
+  readonly actual_version?: number
+  readonly version?: number
+  readonly is_current?: boolean
+  readonly title?: string
+  readonly category?: string
+  readonly scope_labels?: string[]
+  readonly record_status?: string
+  readonly evidence_status?: string
+  readonly updated_at?: string
+  readonly body_json?: string
+  readonly body_hash?: string
+  readonly evidence?: readonly Record<string, unknown>[]
+}
+
+export interface ReflectionQueryLease {
+  search(ownerId: string, criteria: RecordSearchCriteria, options?: { signal?: AbortSignal; hardMs?: number }): Promise<{ records: RecordSummary[]; limited: boolean }>
+  versions(ownerId: string, ids: readonly string[], options?: { signal?: AbortSignal; hardMs?: number }): Promise<RecordSummary[]>
+  read(ownerId: string, targets: readonly { record_id: string; version?: number }[], experience: boolean, options?: { signal?: AbortSignal; hardMs?: number }): Promise<ReflectionRecordRead[]>
+  release(): void
+}
+
+export interface ReflectionQueryPort {
+  lease(ownerId: string): ReflectionQueryLease | undefined
+  probeBusy(durationMs: number, options?: { cooperativeMs?: number; hardMs?: number; signal?: AbortSignal }): Promise<void>
+  probeReadOnly(): Promise<boolean>
+  dispose(): void
+}
+
+// 主请求额度（I6）：新记录工具独立 20 次 / 累计等待 10 秒 / 累计返回 256KiB。
+export interface ReflectionBudgetRequest {
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly requestId: string
+}
+
+export interface ReflectionBudgetLimits {
+  readonly calls: number
+  readonly waitMs: number
+  readonly bytes: number
+}
+
+export interface ReflectionBudgetReservation {
+  readonly allowed: boolean
+  readonly reason?: 'calls' | 'wait' | 'bytes' | 'unrecoverable'
+  readonly remainingBytes: number
+  readonly remainingWaitMs: number
+}
+
+export interface ReflectionBudgetStore {
+  reserve(request: ReflectionBudgetRequest, limits: ReflectionBudgetLimits): Promise<ReflectionBudgetReservation>
+  settle(request: ReflectionBudgetRequest, usage: { bytes: number; waitedMs: number }): Promise<void>
+  /** 正文临时解引用计量：不超上限才计入并展开。 */
+  settleBytes(request: ReflectionBudgetRequest, bytes: number, limit: number): Promise<{ allowed: boolean; remaining: number }>
+}
+
 // ---- 端口 ----
 
 // 可信当前证据端口：只读本人当前主线程已持久产品投影；在飞目标由 recordTurn 统一补稳定引用。
@@ -352,6 +460,9 @@ export type ReflectionErrorCode =
   | 'revoked'
   | 'conflict'
   | 'limit'
+  | 'busy'
+  | 'cursor_stale'
+  | 'unreadable'
   | 'cancelled'
   | 'system_error'
 
@@ -363,7 +474,7 @@ export interface ReflectionError {
 
 export interface ReflectionResult {
   readonly outcome: 'success' | 'partial_success' | 'failure'
-  readonly progress: 'complete' | 'stopped'
+  readonly progress: 'complete' | 'more' | 'stopped'
   readonly operation: string
   readonly draft?: unknown
   readonly presentation?: unknown
@@ -376,6 +487,8 @@ export interface ReflectionResult {
   readonly not_confirmable_reason?: string
   readonly redactions?: number
   readonly status?: string
+  readonly cursor?: string
+  readonly cursor_expires_at?: string
   readonly error?: ReflectionError
   readonly guidance?: string
 }

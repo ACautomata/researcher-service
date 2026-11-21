@@ -18,7 +18,8 @@
 // skill_packages/skill_files/skill_enablements）。
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
-export const SCHEMA_VERSION = 21
+// 21→22 #1082 RF-T06 记录检索主请求额度账本 reflection_request_budgets（additive）。
+export const SCHEMA_VERSION = 22
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -923,12 +924,25 @@ CREATE TABLE IF NOT EXISTS "reflection_idempotency" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS "reflection_request_budgets" (
+    "requestId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "lastRunId" TEXT NOT NULL,
+    "calls" INTEGER NOT NULL DEFAULT 0,
+    "waitedMs" INTEGER NOT NULL DEFAULT 0,
+    "returnedBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS "reflection_records_ownerId_status_idx" ON "reflection_records"("ownerId", "status");
 CREATE INDEX IF NOT EXISTS "reflection_records_ownerId_updatedAt_idx" ON "reflection_records"("ownerId", "updatedAt");
 CREATE UNIQUE INDEX IF NOT EXISTS "reflection_revisions_recordId_version_key" ON "reflection_revisions"("recordId", "version");
 CREATE UNIQUE INDEX IF NOT EXISTS "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");
 CREATE INDEX IF NOT EXISTS "reflection_grants_ownerId_draftId_status_idx" ON "reflection_grants"("ownerId", "draftId", "status");
 CREATE INDEX IF NOT EXISTS "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
+CREATE INDEX IF NOT EXISTS "reflection_request_budgets_ownerId_sessionId_idx" ON "reflection_request_budgets"("ownerId", "sessionId");
 `)
 
   // 20→21：v20 库的 reflection_presentations 已存在（旧 CREATE 无 ackTurn）——补列。

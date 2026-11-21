@@ -983,6 +983,23 @@ model ReflectionIdempotency {
   @@map("reflection_idempotency")
 }
 
+// #1082（RF-T06）记录检索主请求额度账本：与历史检索独立（次数/等待/字节各一套），
+// requestId = 可信 triggerMessageId；resume/recover 延续同一行，不重新发放。
+model ReflectionRequestBudget {
+  requestId     String   @id
+  ownerId       String
+  sessionId     String
+  lastRunId     String
+  calls         Int      @default(0)
+  waitedMs      Int      @default(0)
+  returnedBytes Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([ownerId, sessionId])
+  @@map("reflection_request_budgets")
+}
+
 model ReflectionEvent {
   seq       Int      @id @default(autoincrement())
   ownerId   String

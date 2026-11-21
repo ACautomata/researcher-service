@@ -6,7 +6,9 @@ import {
   REFLECTION_CATEGORIES,
   REFLECTION_DRAFT_STATUSES,
   REFLECTION_LIMITS,
+  REFLECTION_RECORD_STATUSES,
   REFLECTION_REGIONS,
+  REFLECTION_RETRIEVAL,
 } from './values'
 
 const id = z.string().min(1).max(128)
@@ -58,24 +60,43 @@ const DraftContent = {
 export const ReflectionSearchSchema = z.object({
   operation: z.literal('search'),
   purpose: z.enum(['experience', 'management']).default('experience'),
-  query: z.string().max(256).optional(),
+  query: z.string().max(REFLECTION_RETRIEVAL.queryCodePoints * 2).optional(),
   category: z.enum(REFLECTION_CATEGORIES).optional(),
   scope: z.array(z.string().min(1).max(REFLECTION_LIMITS.scopeLabelCodePoints)).max(REFLECTION_LIMITS.scopeLabels).optional(),
-  state: z.enum(REFLECTION_DRAFT_STATUSES).optional(),
+  // management：正式记录生命周期筛选；草稿单独 draft_state，不混入经验匹配。
+  state: z.enum(REFLECTION_RECORD_STATUSES).optional(),
+  draft_state: z.enum(REFLECTION_DRAFT_STATUSES).optional(),
+  limit: z.number().int().min(1).max(REFLECTION_RETRIEVAL.pageMax).optional(),
+  cursor: z.string().min(1).max(512).optional(),
 }).strict().superRefine((v, ctx) => {
   if (v.query !== undefined && v.query.trim() === '') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: '空白 query 不是目录查询' })
   }
-  if (v.purpose === 'experience' && v.state !== undefined) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'experience 检索不接受草稿状态' })
+  if (v.purpose === 'experience' && (v.state !== undefined || v.draft_state !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'experience 检索不接受草稿或记录状态筛选' })
+  }
+  if (v.state !== undefined && v.draft_state !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: '记录与草稿状态筛选不能同时使用' })
   }
 })
 
 export const ReflectionReadSchema = z.object({
   operation: z.literal('read'),
   purpose: z.enum(['experience', 'management']).default('experience'),
-  targets: z.array(z.object({ draft_id: id, version: z.number().int().min(1).optional() }).strict()).min(1).max(5),
-}).strict()
+  targets: z.array(z.object({
+    record_id: id.optional(),
+    draft_id: id.optional(),
+    version: z.number().int().min(1).optional(),
+  }).strict().superRefine((v, ctx) => {
+    if ((v.record_id === undefined) === (v.draft_id === undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: '每个目标须且只能指定 record_id 或 draft_id' })
+    }
+  })).min(1).max(REFLECTION_RETRIEVAL.readTargets),
+}).strict().superRefine((v, ctx) => {
+  if (v.purpose === 'experience' && v.targets.some((t) => t.draft_id !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'experience 读取不接受草稿目标' })
+  }
+})
 
 export const ReflectionDraftSchema = z.object({
   operation: z.literal('draft'),

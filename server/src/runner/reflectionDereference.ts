@@ -6,16 +6,17 @@
 
 import { createMiddleware } from 'langchain'
 import type { BaseMessage } from '@langchain/core/messages'
-import { REFLECTION_BODY_REF_RE, REFLECTION_DRAFT_REF_RE } from '../reflections/values'
+import { REFLECTION_BODY_REF_RE, REFLECTION_DRAFT_REF_RE, REFLECTION_RECORD_REF_RE } from '../reflections/values'
 import type { ReflectionService } from '../reflections/service'
 import { currentReflectionFrame } from './reflectionFrame'
 
-type Dereference = Pick<ReflectionService, 'displayBodyText' | 'draftBodyText'>
+type Dereference = Pick<ReflectionService, 'displayBodyText' | 'draftBodyText' | 'recordBodyText'>
 
 function expandString(text: string, bodies: ReadonlyMap<string, string>): string {
   return text
     .replace(REFLECTION_BODY_REF_RE, (match, id: string) => bodies.get(`display:${id}`) ?? match)
     .replace(REFLECTION_DRAFT_REF_RE, (match, id: string, version: string) => bodies.get(`draft:${id}:${version}`) ?? match)
+    .replace(REFLECTION_RECORD_REF_RE, (match, id: string, version: string) => bodies.get(`record:${id}:${version}`) ?? match)
 }
 
 function expandContent(content: unknown, bodies: ReadonlyMap<string, string>): unknown {
@@ -66,7 +67,17 @@ async function collectBodies(messages: readonly BaseMessage[], dereference: Dere
       for (const match of text.matchAll(REFLECTION_DRAFT_REF_RE)) {
         const key = `draft:${match[1]}:${match[2]}`
         if (bodies.has(key)) continue
+        // 草稿正文同样只展开本轮 management read 实际返回的引用。
+        if (!frame.authorizedDrafts.has(`${match[1]}:${match[2]}`)) continue
         const body = await dereference.draftBodyText(frame.context.ownerId, match[1], Number(match[2]))
+        if (body !== null) bodies.set(key, body)
+      }
+      for (const match of text.matchAll(REFLECTION_RECORD_REF_RE)) {
+        const key = `record:${match[1]}:${match[2]}`
+        if (bodies.has(key)) continue
+        // 只有本轮 read 实际授权过的记录引用才展开；模型自填的引用保持占位。
+        if (!frame.authorizedRecords.has(`${match[1]}:${match[2]}`)) continue
+        const body = await dereference.recordBodyText(frame.context, match[1], Number(match[2]))
         if (body !== null) bodies.set(key, body)
       }
     }
