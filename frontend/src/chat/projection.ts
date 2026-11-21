@@ -17,6 +17,7 @@
 import type {
   LiveTurn,
   MediaRef,
+  PresentationRef,
   ProjectionMessage,
   SessionProjection,
   ToolLine,
@@ -64,6 +65,9 @@ export interface Msg {
   files: TurnFileRow[] // #959 轮次产物卡片行（turn.files 事件 / attachmentsJson files 键同形状；产物非轨迹——恒在折叠条外）
   filesTotal?: number // #960 截断计数（files 非空时 = 截断前行数，缺省 files.length；files 空不落键）
   hasExec?: boolean // #961 exec 提示行标记（true 才落键——本轮含 EXEC_TOOLS 调用；缺省无提示行）
+  // #1080 RF-T04 反思展示引用（attachmentsJson presentations 键镜像）：只装引用；结构化反思块
+  // 按引用读取完整正文并回执，不依赖截断工具行。
+  presentations?: PresentationRef[]
   traceFolded?: boolean // 轮次折叠（#664）：assistant 有轨迹终态默认收起（两入口同判据）
   turnDurationMs?: number // #665 执行时长——新事件面无统一墙钟信号，两入口均不落值（TraceFold 回退计数文案；恢复挂 #794/#796 从行时间戳推导）
   id?: string // 消息行 id（已持久化有值；乐观 echo 由 POST 响应回填）——消息级操作入口定位参数
@@ -82,6 +86,7 @@ export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
     tools: [],
     media: [],
     files: [],
+    presentations: [],
   }
 }
 
@@ -143,6 +148,7 @@ function msgFromRow(row: ProjectionMessage): Msg {
     tools: (row.tools ?? []).map(toolRowFromServer),
     media: [...(row.media ?? [])],
     files: [...files],
+    presentations: [...(row.presentations ?? [])],
     ...(files.length > 0 ? { filesTotal: row.filesTotal ?? files.length } : {}),
     ...(row.hasExec ? { hasExec: true } : {}),
     ...(row.id ? { id: row.id } : {}),
@@ -165,6 +171,7 @@ function overlayFromInFlight(inf: LiveTurn): Msg {
     tools: (inf.turn.tools ?? []).map(toolRowFromServer),
     media: [...(inf.turn.media ?? [])],
     files: [...files],
+    presentations: [...(inf.turn.presentations ?? [])],
     ...(files.length > 0 ? { filesTotal: inf.turn.filesTotal ?? files.length } : {}),
     ...(inf.turn.hasExec ? { hasExec: true } : {}),
     ...(inf.runId ? { runId: inf.runId } : {}),
@@ -298,7 +305,7 @@ function overlayIndex(vm: Msg[], runId: string | undefined): number {
 }
 
 function cloneOverlay(m: Msg): Msg {
-  return { ...m, tools: [...m.tools], media: [...m.media], files: [...m.files] }
+  return { ...m, tools: [...m.tools], media: [...m.media], files: [...m.files], ...(m.presentations ? { presentations: [...m.presentations] } : {}) }
 }
 
 // 空聚合判据（镜像 server reducer.ts isEmpty——终态空 run 不落行，前端同步剥落空 overlay；

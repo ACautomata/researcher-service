@@ -419,6 +419,81 @@ CREATE TABLE "background_execs" (
     CONSTRAINT "background_execs_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "reflection_drafts" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "version" INTEGER NOT NULL DEFAULT 1,
+    "status" TEXT NOT NULL DEFAULT 'preparing',
+    "action" TEXT NOT NULL DEFAULT 'create',
+    "title" TEXT NOT NULL DEFAULT '',
+    "category" TEXT NOT NULL DEFAULT 'other',
+    "contentJson" TEXT NOT NULL DEFAULT '{}',
+    "targetsJson" TEXT,
+    "closedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "reflection_drafts_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_drafts_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "reflection_evidence" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "runId" TEXT,
+    "toolCallId" TEXT,
+    "region" TEXT NOT NULL,
+    "startCp" INTEGER,
+    "endCp" INTEGER,
+    "excerpt" TEXT NOT NULL,
+    "regionHash" TEXT,
+    "contentVersion" TEXT,
+    "status" TEXT NOT NULL,
+    "reason" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_evidence_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "reflection_drafts" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "reflection_presentations" (
+    "displayId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "action" TEXT NOT NULL,
+    "bodyJson" TEXT NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "messageId" TEXT,
+    "ackSeq" INTEGER,
+    "ackedAt" DATETIME,
+    "revokedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_presentations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_presentations_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_presentations_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "reflection_drafts" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "reflection_events" (
+    "seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "ownerId" TEXT NOT NULL,
+    "objectId" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "version" INTEGER,
+    "result" TEXT NOT NULL,
+    "category" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
@@ -483,13 +558,13 @@ CREATE INDEX "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON
 CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
+
+-- CreateIndex
 CREATE INDEX "history_request_budgets_sessionId_updatedAt_idx" ON "history_request_budgets"("sessionId", "updatedAt");
 
 -- CreateIndex
 CREATE INDEX "history_request_budgets_ownerId_updatedAt_idx" ON "history_request_budgets"("ownerId", "updatedAt");
-
--- CreateIndex
-CREATE UNIQUE INDEX "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
 
 -- CreateIndex
 CREATE INDEX "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
@@ -553,4 +628,28 @@ CREATE INDEX "background_execs_sessionId_createdAt_idx" ON "background_execs"("s
 
 -- CreateIndex
 CREATE INDEX "background_execs_state_delivery_idx" ON "background_execs"("state", "delivery");
+
+-- CreateIndex
+CREATE INDEX "reflection_drafts_ownerId_sessionId_idx" ON "reflection_drafts"("ownerId", "sessionId");
+
+-- CreateIndex
+CREATE INDEX "reflection_drafts_ownerId_status_idx" ON "reflection_drafts"("ownerId", "status");
+
+-- CreateIndex
+CREATE INDEX "reflection_evidence_ownerId_messageId_idx" ON "reflection_evidence"("ownerId", "messageId");
+
+-- CreateIndex
+CREATE INDEX "reflection_evidence_runId_idx" ON "reflection_evidence"("runId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "reflection_evidence_draftId_draftVersion_position_key" ON "reflection_evidence"("draftId", "draftVersion", "position");
+
+-- CreateIndex
+CREATE INDEX "reflection_presentations_ownerId_draftId_idx" ON "reflection_presentations"("ownerId", "draftId");
+
+-- CreateIndex
+CREATE INDEX "reflection_presentations_sessionId_idx" ON "reflection_presentations"("sessionId");
+
+-- CreateIndex
+CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
 

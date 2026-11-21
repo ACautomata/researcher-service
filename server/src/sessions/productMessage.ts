@@ -7,7 +7,7 @@ export function parseProductObject(raw: string): Record<string, unknown> | undef
   return undefined
 }
 
-const PRODUCT_FIELDS = ['thinking', 'tools', 'media', 'files', 'filesTotal', 'hasExec'] as const
+const PRODUCT_FIELDS = ['thinking', 'tools', 'media', 'files', 'filesTotal', 'hasExec', 'presentations'] as const
 export function parseSavedProduct(raw: string): {
   object?: Record<string, unknown>
   fields: Record<string, unknown>

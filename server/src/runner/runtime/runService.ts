@@ -1,5 +1,9 @@
 import { createSessionHistoryTool, runWithHistoryContext } from '../historyTool'
 import type { HistoryRuntimePort } from '../../sessions/history/model'
+import { createReflectionTool } from '../reflectionTool'
+import { runWithReflectionContext, type ReflectionRunContext } from '../reflectionFrame'
+import { createReflectionDereferenceMiddleware } from '../reflectionDereference'
+import type { ReflectionsPort } from '../../reflections/runtime'
 import { BackgroundExecService, withBackgroundRun, resultMessageId } from '../background/service'
 import type { BackgroundExec } from '../../generated/prisma/client'
 import { NextStepSuggestions } from '../../sessions/nextStepSuggestion'
@@ -95,7 +99,7 @@ import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_
 import { truncateUtf8 } from './projector'
 import { disableLangsmithTracing } from './tracing'
 import { lastMessage, scanMediaBlocks } from './mediaBlocks'
-import { turnFromCheckpointMessages } from './checkpointTurn'
+import { turnFromCheckpointMessages, presentationsFromCheckpointMessages } from './checkpointTurn'
 import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot, type ToolLine } from '../../sessions/reducer'
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
@@ -187,6 +191,8 @@ export type EventPublisher = Pick<StreamHub, 'publish'>
 export interface RunServiceDeps {
   /** RF-T01/T03 内部集成接缝；生产 assembly 不注入，等待 RF-T12 完整门禁。 */
   readonly history?: HistoryRuntimePort
+  /** RF-T04 内部集成接缝（#1080）；生产 assembly 同等待完整门禁。 */
+  readonly reflections?: ReflectionsPort
   readonly background?: BackgroundExecService
   readonly chaoxing?: ChaoxingService
   readonly prisma: PrismaClient
@@ -312,6 +318,7 @@ interface PendingApproval extends Omit<RunEventContext, 'sessionId'> {
 // getOrBuildGraph 私有）——不导出。
 interface GraphBuildContext {
   readonly historyLeader: boolean
+  readonly reflectionsLeader: boolean
   readonly threadId: string
   readonly configVersion: number
   readonly policy: InterruptPolicy | undefined
@@ -901,6 +908,10 @@ export class RunService {
       historyLeader = historyRequestId !== undefined || !this.deps.history.requiresRequestIdentity
     }
 
+    // #1080 RF-T04：reflections 仅主 Leader 图装配（teammate / 子线程 / 系统命令不接）。
+    const reflectionsLeader = this.deps.reflections !== undefined &&
+      !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
+
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
     // re-ensure（stopped → start，文件保留），返回容器即 /lab/ 工具根（可能 ≠
     // session.containerId 陈旧值）。失败按 pre-start 面向上传播（job failed / Inline 调用方；
@@ -1014,6 +1025,7 @@ export class RunService {
       : this.getOrBuildGraph({
           threadId: cmd.sessionId,
           historyLeader,
+          reflectionsLeader,
           configVersion: snapshot.version,
           policy,
           model,
@@ -1124,6 +1136,8 @@ export class RunService {
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
     let anchorCheckpointId: string | null = null
     let input: unknown = null
+    // #1080：reflections run frame 在 try 内构造、finally 的 recordTurn 统一接缝消费展示引用。
+    let reflectionFrame: ReflectionRunContext | undefined
     try {
       await this.deps.background?.beginRun(cmd)
       if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -1283,11 +1297,24 @@ export class RunService {
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 六件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
         const pluginFrame = await this.buildPluginRunFrame(cmd, labContainer, snapshot, controller.signal)
+        // #1080 RF-T04：reflections run frame（Leader only）——工具/模型输入解引用共享 owner/
+        // session/run；present 的展示引用在本轮 recordTurn 统一接缝绑定终态 assistant 消息。
+        const reflectionLeader = !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
+        const reflectionFrameLocal: ReflectionRunContext | undefined = this.deps.reflections && reflectionLeader
+          ? {
+              context: { ownerId: cmd.ownerId, currentSessionId: cmd.sessionId, role: 'leader', runId: cmd.runId },
+              signal: controller.signal,
+              presentations: [],
+            }
+          : undefined
+        reflectionFrame = reflectionFrameLocal
+        const withReflection = <T>(fn: () => Promise<T>): Promise<T> =>
+          reflectionFrameLocal ? runWithReflectionContext(reflectionFrameLocal, fn) : fn()
         await withBackgroundRun(cmd, controller.signal, () => runWithRunContext(cmd.runId, async () => {
           await runWithHistoryContext({ context: { ownerId: cmd.ownerId, currentSessionId: cmd.sessionId,
             role: session.isTeammate || cmd.teammateId || cmd.parentSessionId ? 'teammate' : 'leader',
             ...(historyRequestId ? { requestId: historyRequestId } : {}),
-          }, signal: controller.signal }, () => runWithPluginRunFrame(pluginFrame, async () => {
+          }, signal: controller.signal }, () => withReflection(() => runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
               ...invocation,
               recursionLimit: this.recursionLimit,
@@ -1303,7 +1330,7 @@ export class RunService {
                 this.publish(cmd.ownerId, ev, cmd)
               }
             }
-          }))
+          })))
         }))
         // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
         const state = await this.graphState(agent, cmd.sessionId)
@@ -1473,20 +1500,42 @@ export class RunService {
       // interrupted 形态下 blob 与 reducer 前缀重叠必重影，故不做）。后续 resume 的常规
       // 落行同样只含 resume 段，缺口固化。
       let savedReplyId: string | void = undefined
+      const reflectionPresentations = reflectionFrame && reflectionFrame.presentations.length > 0
+        ? [...reflectionFrame.presentations]
+        : undefined
+      const bindReflections = async (messageId: string, extra?: readonly import('../../reflections/model').PresentationRef[]): Promise<void> => {
+        if (!this.deps.reflections) return
+        const displayIds = [...(reflectionPresentations ?? []), ...(extra ?? [])].map((p) => p.displayId)
+        try {
+          await this.deps.reflections.bindInFlightEvidence({
+            ownerId: cmd.ownerId,
+            sessionId: cmd.sessionId,
+            runId: cmd.runId,
+            messageId,
+            ...(displayIds.length > 0 ? { displayIds } : {}),
+          })
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] reflections bind failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
+        }
+      }
       if (this.recordTurn && cmd.kind === 'recover' && finalState === 'completed') {
         const anchor = anchorCheckpointId
         if (anchor !== null && !(await this.turnAlreadyRecorded(cmd.sessionId, anchor))) {
           try {
             const aggregate = await this.turnSnapshotFromCheckpoint(cmd.sessionId)
-            if (!isEmptyTurnSnapshot(aggregate)) {
+            const recoveredPresentations = await this.presentationRefsFromCheckpoint(cmd.sessionId)
+            if (!isEmptyTurnSnapshot(aggregate) || recoveredPresentations.length > 0) {
               await this.deleteRunResidues(cmd.sessionId)
-              await this.recordTurn({
+              savedReplyId = await this.recordTurn({
                 sessionId: cmd.sessionId,
                 runId: cmd.runId,
                 anchorCheckpointId: anchor,
                 status: 'success', // 本分支条件即 finalState === 'completed'
                 aggregate,
+                ...(recoveredPresentations.length > 0 ? { presentations: recoveredPresentations } : {}),
               })
+              if (typeof savedReplyId === 'string') await bindReflections(savedReplyId, recoveredPresentations)
             }
           } catch (err) {
             // eslint-disable-next-line no-console
@@ -1504,7 +1553,9 @@ export class RunService {
             anchorCheckpointId,
             status: finalState === 'completed' ? 'success' : 'failed',
             aggregate: turn.snapshot(),
+            ...(reflectionPresentations !== undefined ? { presentations: reflectionPresentations } : {}),
           })
+          if (typeof savedReplyId === 'string') await bindReflections(savedReplyId)
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(`[runner] recordTurn failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
@@ -2155,7 +2206,7 @@ export class RunService {
 
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
   private getOrBuildGraph(ctx: GraphBuildContext): DeepAgentLike {
-    const { threadId, configVersion, policy, model, ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, journalSessionId, pluginToolDefs, pluginPrompt, skillCatalogVersion, skillPrompt, skillTools } = ctx
+    const { threadId, configVersion, policy, model, ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, journalSessionId, pluginToolDefs, pluginPrompt, skillCatalogVersion, skillPrompt, skillTools, historyLeader, reflectionsLeader } = ctx
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
     // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
@@ -2164,7 +2215,7 @@ export class RunService {
     // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
     // skill 目录版本入键（#1057）：启用集已在 capabilities.key（enabledSkillIds 并入），
     // 版本管「开着的 skill 长什么样」（id/name/sha256 稳定序 sha256）。
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}|history:${this.deps.history && ctx.historyLeader ? 'leader-v1' : 'none'}`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}|history:${this.deps.history && historyLeader ? 'leader-v1' : 'none'}|reflections:${this.deps.reflections && reflectionsLeader ? 'leader-v1' : 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     // #782 × #785 接缝：journaling 开启时 backendFor 产出打点装饰器（其 apply 经 putBuffer
@@ -2192,8 +2243,12 @@ export class RunService {
     // 检索只读（getArchive 拉镜像），不经写锁面（#785 锁只覆盖 putArchive/破坏性 op）。
     const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
     const middleware = this.runtimeMiddleware(threadId)
+    const reflectionMiddleware = this.deps.reflections && reflectionsLeader
+      ? [createReflectionDereferenceMiddleware(this.deps.reflections)]
+      : []
     const agent = buildLeaderAgent({
-      ...(this.deps.history && ctx.historyLeader ? { historyTool: createSessionHistoryTool(this.deps.history) } : {}),
+      ...(this.deps.history && historyLeader ? { historyTool: createSessionHistoryTool(this.deps.history) } : {}),
+      ...(this.deps.reflections && reflectionsLeader ? { reflectionTool: createReflectionTool(this.deps.reflections) } : {}),
       model,
       backend: this.deps.background?.backend(backend, labContainer) ?? backend,
       checkpointer: this.deps.saver,
@@ -2218,7 +2273,8 @@ export class RunService {
       //（graphFactory joinSections 拼接；空集不入拼接）。
       ...(skillPrompt !== '' ? { skillPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键，见 runtimeMiddleware()）。
-      ...(middleware.length > 0 ? { middleware } : {}),
+      // 反思输入解引用：#1080 独立适配（不假定既有工具 middleware 支持），仅 Leader 图。
+      ...(middleware.length > 0 || reflectionMiddleware.length > 0 ? { middleware: [...middleware, ...reflectionMiddleware] } : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。
@@ -2473,6 +2529,11 @@ export class RunService {
 
   private async turnSnapshotFromCheckpoint(sessionId: string): Promise<TurnSnapshot> {
     return turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
+  }
+
+  // #1080：recover 终态落行时还原 present 引用（与 turnSnapshot 同源 checkpoint messages）。
+  private async presentationRefsFromCheckpoint(sessionId: string): Promise<import('../../reflections/model').PresentationRef[]> {
+    return presentationsFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
   }
 
   // 从持久化状态推导「thread 停在 interrupt」（#747 A 节硬约束的内存缺失 fallback 面）：

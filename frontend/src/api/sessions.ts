@@ -54,6 +54,18 @@ export interface TurnFileRow {
   size?: number
 }
 
+// #1080 RF-T04 反思展示引用（server reflections/model.ts PresentationRef 镜像）：attachmentsJson
+// presentations 键只装引用（displayId/draftId/version/bodyHash/status），完整正文经
+// GET /api/v1/reflections/displays/:displayId 授权读取——不走 4KiB 工具 details 截断面。
+export interface PresentationRef {
+  displayId: string
+  draftId: string
+  version: number
+  bodyHash: string
+  status: string
+  confirmable: boolean
+}
+
 export interface TurnContent {
   content: string
   thinking?: string
@@ -66,6 +78,8 @@ export interface TurnContent {
   // #961 exec 提示行标记（server TurnSnapshot.hasExec 镜像）：本轮含 EXEC_TOOLS（Shell）调用
   // ——卡底「本轮含 Shell 调用，其文件副作用不在此列」提示行数据源；true 才落键，缺省无标记。
   hasExec?: boolean
+  // #1080 反思展示引用（只装引用，正文另经 reflections/displays 读取）。
+  presentations?: PresentationRef[]
 }
 
 // 投影行：attachmentsJson v1 展开进行内（assistant 行 thinking/tools/media；command 面读侧

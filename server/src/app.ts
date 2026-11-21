@@ -15,6 +15,7 @@ import { createFiguresRouter } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
+import { createReflectionsRouter, type ReflectionsRouterDeps } from './reflections/routes'
 import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachments/routes'
 import { createSkillsRouter, type SkillsRouterDeps } from './skills/routes'
 import { createPluginsRouter, type PluginsRouterDeps } from './plugins/routes'
@@ -42,6 +43,9 @@ export interface AppDeps {
   // resume + 历史投影。注入即挂载（条件挂载先例）——生产 server.ts 装配 SessionService
   //（持 runner 命令面 + hub + dispatch）；缺省 = 不挂（/api/v1/sessions → 90005）。
   sessions?: SessionsRouterDeps
+  // reflections（#1080 RF-T04）：反思展示读取/ack 窄协议（/api/v1/reflections）。注入即挂载
+  //（条件挂载先例）；工具本体仍由 runner 内部接缝控制，生产不提前开放。
+  reflections?: ReflectionsRouterDeps
   // attachments 接缝（#780，#747 G 节附件 D1–D6）：上传/下载 REST（挂 /api/v1，
   // POST /sessions/:id/attachments + GET /attachments/:id/download）。注入即挂载（条件挂载
   // 先例）——生产 server.ts 装配 AttachmentsService（临时区 + files 沙箱读通道）；缺省 = 不挂。
@@ -59,7 +63,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, skills, models, chaoxing }: AppDeps): Application {
+export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, skills, models, chaoxing, reflections }: AppDeps): Application {
   const app = express()
   // wiki 5mb json 特例已随写面整域退役删除（#758 Q3——codex PR#346 的大 body 契约随
   // PUT/POST/DELETE /wiki/page 下线失效）：现存读面 GET 无 body，POST /wiki/update 触发面
@@ -113,6 +117,10 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   // sessions（#778）：会话 REST 域（/api/v1/sessions）。存在即挂载（条件挂载先例）。
   if (sessions) {
     app.use('/api/v1/sessions', createSessionsRouter(sessions))
+  }
+  // reflections（#1080 RF-T04）：展示读取/ack 窄协议（挂 /api/v1，条件挂载先例）。
+  if (reflections) {
+    app.use('/api/v1/reflections', createReflectionsRouter(reflections))
   }
   // OAuth 回调必须先于附件路由的 /api/v1 全域认证中间件；超星受保护端点在域内自行认证。
   app.use('/api/v1/integrations/chaoxing', createChaoxingRouter(prisma, chaoxing))

@@ -270,3 +270,6 @@ export const backgroundOutputQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(16384).default(16384),
 })
 export const backgroundCancelSchema = z.object({}).strict()
+
+// #1080 RF-T04：反思展示 ack 请求体（窄协议端点；schema 真源在 reflections/params.ts）。
+export { reflectionAckSchema } from '../reflections/params'

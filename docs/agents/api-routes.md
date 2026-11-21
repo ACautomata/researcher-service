@@ -71,6 +71,11 @@
   指针不动]；files 面结果挂 `files` 字段{reverted,skippedMissing,degraded}）+ `/<id>/rewind/preview`
   （逆放摘要 + 锚后 exec 跨越清单——POST 同 body，只读）；
   50002 同码防探测）。
+- `/api/v1/reflections/displays/<displayId>` — 反思展示窄协议（#1080 RF-T04）：GET 读取完整五部分
+  展示正文（聊天结构化块渲染源；草稿/正式记录操作仍只经 Leader 工具，无记录 CRUD）；POST
+  `/<displayId>/ack` 浏览器完整渲染后回执 `{version, hash, messageId}`（`reflectionAckSchema`；
+  仅证明客户端已呈现版本，不是写授权）。50009 展示不存在/越权同码防探测；50010 未绑定终态消息
+  或证据未核验；50011 版本/hash/消息引用冲突；90002 校验失败。
 - `POST /api/v1/sessions/:id/attachments` + `GET /api/v1/attachments/:id/download` — 附件域
   REST（#780 · G 节 D1–D6：multipart 上传[field `file` + 表单 fileName/mimeType，multer 落控制面
   临时区，REST 不直写沙箱——物化归 runner ingestion 节点；缺字段/超大 → 90002；单文件 ≤100MB ·
@@ -103,7 +108,8 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 
   #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）；#783 起
   50004 approval_not_found 同码防探测；#778 增（50004 让位 #783，顺移起）50005 run 进行中禁输入·
   非终态拒删 / 50006 无在飞可中断 / 50007 幂等 key 同 key 异 content；#782 起 50008 文件状态
-  重放中[写围栏等待超时，报当前持有者]）· `6xxxx` files ·
+  重放中[写围栏等待超时，报当前持有者]；#1080 起 50009 反思展示不存在/越权 · 50010 展示未绑定
+  终态消息或证据未核验 · 50011 展示版本/hash/消息引用冲突）· `6xxxx` files ·
 `7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（detail/png/svg 三读路径共用归属门）·
 70041/70042 [退役保留]（幂等冲突/PNG 未就绪随 #791 创建端点与 GenerationJob 退役，码段防复用）·
 70043 产物不可用（渲染失败缺省/产物缺失，PNG/SVG 共用））·

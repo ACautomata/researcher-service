@@ -1,5 +1,6 @@
 import { joinSections } from './promptSections'
 import { HISTORY_LEADER_GUIDANCE } from '../historyTool'
+import { REFLECTION_LEADER_GUIDANCE } from '../reflectionTool'
 // Leader 单 agent 图工厂（#777 · #747 A 节「基础 leader 单 agent loop」）。
 //
 // createDeepAgent 三扩展点接线（#724 PoC 验证的形态）：
@@ -55,6 +56,8 @@ export function interruptOnFromPolicy(policy: InterruptPolicy | undefined): Inte
 export interface LeaderAgentParams {
   /** RF-T01 内部验证接缝；生产组合根不注入，待完整门禁统一开放。 */
   readonly historyTool?: NonNullable<CreateDeepAgentParams['tools']>[number]
+  /** RF-T04 内部验证接缝（#1080）：reflection_records 仅 Leader；生产同待完整门禁。 */
+  readonly reflectionTool?: NonNullable<CreateDeepAgentParams['tools']>[number]
   // 宽进 Runnable：ProviderRegistry.getDefaultModel 产出 withFallbacks 组合链（#747 F 节
   // 「fallback 链由 runner 从配置快照派生 .withFallbacks」）。
   readonly model: Runnable
@@ -92,8 +95,8 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt, params.skillPrompt, params.historyTool ? HISTORY_LEADER_GUIDANCE : undefined),
-    ...(params.pluginPrompt || params.skillPrompt || params.historyTool
+    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt, params.skillPrompt, params.historyTool ? HISTORY_LEADER_GUIDANCE : undefined, params.reflectionTool ? REFLECTION_LEADER_GUIDANCE : undefined),
+    ...(params.pluginPrompt || params.skillPrompt || params.historyTool || params.reflectionTool
       ? {
           subagents: [{
             ...GENERAL_PURPOSE_SUBAGENT,
@@ -110,6 +113,7 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
       ...(params.pluginTools ?? []),
       ...(params.skillTools ?? []),
       ...(params.historyTool ? [params.historyTool] : []),
+      ...(params.reflectionTool ? [params.reflectionTool] : []),
     ],
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }

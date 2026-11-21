@@ -8,7 +8,7 @@ import { SCHEMA_VERSION } from '../scripts/lib/incremental-schema.mjs'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 全表到位 + #791 AutoFigure 换轨
 //（figures 新形状重建 + generation_jobs 退役）+ teammate/mailbox + #858 containers 表整表退役
-// + user_version 归 16（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
+// + user_version 归 20（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
 // #790 teammates.kind + #791 figures 换轨 12→13；T0 #801 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
@@ -52,7 +52,7 @@ function assertUpgraded(dbPath: string): void {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16；#1037 17→18；18→19 #1046 durable exec + #1055 Skill 市场；19→20 #1079 历史主请求额度账本
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16；#1037 17→18；18→19 #1046 durable exec + #1055 Skill 市场；19→20 #1079 历史主请求额度账本 + #1080 reflections 四表
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)

@@ -14,6 +14,7 @@
 import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES } from './values'
 import { truncateUtf8 } from './projector'
 import type { TurnSnapshot, ToolLine } from '../../sessions/reducer'
+import type { PresentationRef } from '../../reflections/model'
 
 // 入参宽进形状：checkpoint channel_values.messages（BaseMessage 运行时面的结构子集——
 // 从 blob 反序列化回真实例，字段访问全防御）。
@@ -136,4 +137,34 @@ export function turnFromCheckpointMessages(messages: unknown): TurnSnapshot {
     ...(thinking !== '' ? { thinking } : {}),
     ...(tools.size > 0 ? { tools: [...tools.values()] } : {}),
   }
+}
+
+// #1080 RF-T04：recover 终态落行时从 checkpoint 工具消息还原本轮 present 的展示引用
+// （工具输出 JSON 的 presentation 字段只装引用；正文仍由 presentation 存储授权读取）。
+export function presentationsFromCheckpointMessages(messages: unknown): PresentationRef[] {
+  const list = Array.isArray(messages) ? messages : []
+  const refs = new Map<string, PresentationRef>()
+  for (const m of list) {
+    if (msgType(m) !== 'tool') continue
+    const content = isRecord(m) ? m.content : undefined
+    if (typeof content !== 'string') continue
+    try {
+      const parsed = JSON.parse(content) as { presentation?: unknown } | null
+      const p = parsed?.presentation
+      if (!isRecord(p)) continue
+      if (typeof p.displayId !== 'string' || typeof p.draftId !== 'string' || typeof p.version !== 'number') continue
+      if (typeof p.bodyHash !== 'string' || typeof p.status !== 'string') continue
+      refs.set(p.displayId, {
+        displayId: p.displayId,
+        draftId: p.draftId,
+        version: p.version,
+        bodyHash: p.bodyHash,
+        status: p.status as PresentationRef['status'],
+        confirmable: p.confirmable === true,
+      })
+    } catch {
+      // 截断/坏 JSON：引用缺失，不伪造。
+    }
+  }
+  return [...refs.values()]
 }

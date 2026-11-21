@@ -22,6 +22,7 @@ import {
   pluginCommandCompletionQuerySchema,
   pluginEnablementSchema,
   pluginLlmAssignmentWriteSchema,
+  reflectionAckSchema,
   sessionApprovalSchema,
   sessionCreateSchema,
   sessionForkSchema,
@@ -234,6 +235,11 @@ register({
 })
 
 register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}', tag: 'Sessions', summary: 'Resolve a leader or teammate approval', auth: 'user', body: sessionApprovalSchema, nullData: true, errors: '50002 session_not_found; 50004 approval_not_found; 50001 already_resumed; 40043 quota exceeded; 90002 validation', dataNote: 'Acknowledges queued resume; only the checkpoint thread owning this escalation resumes.' })
+
+// reflections（#1080 RF-T04）：反思展示窄协议（无记录 CRUD；草稿/正式记录只经 Leader 工具）。
+// 50009 = 展示不存在/越权同码防探测；50010 = 未绑定终态消息或证据未核验；50011 = 版本/hash 冲突。
+register({ method: 'get', path: '/api/v1/reflections/displays/{displayId}', tag: 'Reflections', summary: 'Read a reflection draft presentation for rendering', auth: 'user', errors: '50009 display not found; 10005', dataNote: 'data: {displayId,draftId,version,action,bodyHash,status,body,evidence,messageId,createdAt} —— 完整五部分展示正文（聊天结构化块渲染源）；删除后 deleted=true 且不回显正文。' })
+register({ method: 'post', path: '/api/v1/reflections/displays/{displayId}/ack', tag: 'Reflections', summary: 'Acknowledge that the client fully rendered a presentation version', auth: 'user', body: reflectionAckSchema, errors: '50009 display not found; 50010 not bound/not verified; 50011 version/hash/message conflict; 90002 validation', dataNote: 'data: {seq,ackedAt} —— seq = 服务端单调序号（reflection_events AUTOINCREMENT），用于与后续用户确认判先后；ack 仅证明客户端已呈现，不是写授权。' })
 
 // plugins（#788 · #752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。
 register({ method: 'get', path: '/api/v1/plugins', tag: 'Plugins', summary: 'List plugin catalog with the caller enablement bits', auth: 'user', errors: '90002 validation', dataNote: '{plugins:[{id,name,description,version,enabled}]} —— 目录 = 编译期静态清单；enabled 无行 = false（默认未启用）。' })

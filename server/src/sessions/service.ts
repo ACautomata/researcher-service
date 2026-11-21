@@ -66,6 +66,8 @@ export interface ProjectionMessage {
   readonly files?: unknown[]
   // #961 exec 提示行标记（attachmentsJson files 块内随帧携带——true 才落键；缺省即无标记）。
   readonly hasExec?: boolean
+  // #1080 RF-T04 反思展示引用（attachmentsJson presentations 键——只装引用，正文另行授权读取）。
+  readonly presentations?: unknown[]
   readonly anchorCheckpointId: string | null
   readonly createdAt: string
 }
@@ -310,6 +312,7 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
     files?: unknown[]
     filesTotal?: number
     hasExec?: boolean
+    presentations?: unknown[]
   } = {}
   if (row.role === 'assistant') {
     // 页面恢复维持既有字段及缺省纪律；历史口另行报告解析问题。
@@ -807,7 +810,10 @@ export class SessionService {
       role: 'assistant',
       content: p.aggregate.content,
       anchorCheckpointId: p.anchorCheckpointId,
-      attachmentsJson: serializeAttachments(p.aggregate),
+      attachmentsJson: serializeAttachments({
+        ...p.aggregate,
+        ...(p.presentations !== undefined && p.presentations.length > 0 ? { presentations: [...p.presentations] } : {}),
+      }),
     }))
     await this.recordTextTraceForTurn(p)
     await this.autoTitle(p.sessionId)

@@ -66,6 +66,9 @@ model User {
   pluginEnablements PluginEnablement[]
   pluginLlmAssignments PluginLlmAssignment[]
   historyRequestBudgets HistoryRequestBudget[]
+  // --- reflections（#1080 RF-T04）---
+  reflectionDrafts ReflectionDraft[]
+  reflectionPresentations ReflectionPresentation[]
 
   @@map("users")
 }
@@ -263,6 +266,8 @@ model Session {
   teammateMailboxParentWaits TeammateMailboxWait[] @relation("MailboxWaitParent")
   teammateMailboxThreadWait TeammateMailboxWait? @relation("MailboxWaitThread")
   historyRequestBudgets HistoryRequestBudget[]
+  reflectionDrafts ReflectionDraft[]
+  reflectionPresentations ReflectionPresentation[]
 
   @@index([ownerId])
   @@map("sessions")
@@ -782,4 +787,124 @@ model BackgroundExec {
   @@index([sessionId, createdAt])
   @@index([state, delivery])
   @@map("background_execs")
+}
+
+// ===========================================================================
+// #1080（RF-T04）reflections 域 —— 持久草稿 / 证据 / 展示 / 最小事件
+//
+// 本票只落地草稿链路（draft/present/read/cancel）；正式 record/revision 表与确认授权
+// 归 #1081（RF-T05）与 #1082 之后。草稿无确认不得进入正式记录或 experience 检索——
+// 本票的 search(experience) 恒无结果（无 record 表可查）。
+//
+// 设计要点（父规格 I3/I4/I5/I7）：
+//   - 正文真源独立于工具 details：草稿正文存 contentJson，展示正文存 presentations.bodyJson；
+//     工具/checkpoint/消息聚合只存 displayId/version/hash 引用。
+//   - evidence 存原始来源定位（session/message/run/toolCallId/region/码点范围）+ 服务端
+//     计算的 regionHash/contentVersion（不信任模型自填证明）。
+//   - 展示绑定终态 assistant messageId（recordTurn 统一接缝回填；含 recover）。
+//   - ack 与后续确认的单调序号由 reflection_events 的 AUTOINCREMENT 提供（同一 SQLite
+//     单写服务模型，不靠同毫秒时间戳）。
+// ===========================================================================
+
+model ReflectionDraft {
+  id        String  @id @default(cuid())
+  owner     User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId   String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+
+  // 当前版本（实质修改 version 递增；旧展示随 present 撤销，见 service）。
+  version   Int     @default(1)
+  // preparing（含在飞/不可核验证据）| pending（全部证据可核验，可展示待确认）
+  // | confirmed_pending_save | committed | rejected | expired | cancelled（后四者归 #1081+）
+  status    String  @default("preparing")
+  action    String  @default("create")
+  title     String  @default("")
+  category  String  @default("other")
+  // 五部分正文快照（问题与影响/原因分析/改进建议/适用范围；原始证据存 reflection_evidence）
+  contentJson String @default("{}")
+  // 动作目标基准版本（revise/replace/merge 等；本票仅 create/revise 写入）
+  targetsJson String?
+  closedAt  DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  evidence      ReflectionEvidence[]
+  presentations ReflectionPresentation[]
+
+  @@index([ownerId, sessionId])
+  @@index([ownerId, status])
+  @@map("reflection_drafts")
+}
+
+model ReflectionEvidence {
+  id           String          @id @default(cuid())
+  draft        ReflectionDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  draftId      String
+  draftVersion Int
+  position     Int
+  ownerId      String
+  sessionId    String
+  messageId    String?
+  runId        String?
+  toolCallId   String?
+  // content | thinking | tool_result
+  region       String
+  // Unicode 码点范围（null = 未指定，服务端按首次出现定位）
+  startCp      Int?
+  endCp        Int?
+  excerpt      String
+  // 服务端计算：区域原文 hash 与消息内容版本（不采信模型自填）
+  regionHash   String?
+  contentVersion String?
+  // preparing（在飞待落行）| valid | not_ready（截断外/摘要/未解析）
+  status       String
+  reason       String?
+  createdAt    DateTime        @default(now())
+
+  @@unique([draftId, draftVersion, position])
+  @@index([ownerId, messageId])
+  @@index([runId])
+  @@map("reflection_evidence")
+}
+
+model ReflectionPresentation {
+  displayId String @id @default(cuid())
+  owner     User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId   String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+  draft     ReflectionDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  draftId   String
+  draftVersion Int
+  action    String
+  // 完整展示正文（五部分 + 证据摘录）——聊天结构化块的实际渲染源；删除时随专属存储清理。
+  bodyJson  String
+  bodyHash  String
+  // active（待 ack）| acked（客户端已完整渲染）| revoked（被新版本替代）| expired | deleted（正文已清）
+  status    String @default("active")
+  // 绑定终态 assistant 消息行（recordTurn 统一接缝回填；未绑定不可授权）
+  messageId String?
+  ackSeq    Int?
+  ackedAt   DateTime?
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([ownerId, draftId])
+  @@index([sessionId])
+  @@map("reflection_presentations")
+}
+
+model ReflectionEvent {
+  seq       Int      @id @default(autoincrement())
+  ownerId   String
+  objectId  String
+  action    String
+  version   Int?
+  result    String
+  category  String?
+  createdAt DateTime @default(now())
+
+  @@index([ownerId, objectId])
+  @@map("reflection_events")
 }

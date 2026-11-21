@@ -14,7 +14,7 @@
 - `stores/` — Pinia：`auth.ts`（JWT access token + role/mustChangePassword）、`wiki.ts`、`chat.ts`
   （对话页响应式投影：纯 mutation；视图模型类型经 `chat/projection.ts` 再导出）、`fileTabs.ts`
   （会话沙箱 lab 文件 tab，#793 起 root=lab、切会话即换树）。
-- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`sessions/files/wiki/models/users/plugins.ts` 按域；#858 起 containers.ts 客户端随容器管理页退役——files 客户端的 URL 前缀 /api/v1/containers 是 lab 文件面契约保留）。
+- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`sessions/files/wiki/models/users/plugins/reflections.ts` 按域；#858 起 containers.ts 客户端随容器管理页退役——files 客户端的 URL 前缀 /api/v1/containers 是 lab 文件面契约保留）。`reflections.ts` = #1080 反思展示读取 + 渲染 ack（窄协议，无记录 CRUD）。
 - `plugins/` — 插件 web 面基建（#788 骨架 + #799 收录 + #913 收录 research）：`api.ts` = definePluginWeb 契约（props 六件 details/input/state/expanded/isPartial/toolCallId + #799 增 stage 可选件 + #913 增 workflow 可选件——进行态装饰仅实时构造，终态剥落；parseObjectish = details/input 0 信任解析共用助手）+ `registry.ts` = pluginComponentFor 查找（未注册走默认工具行渲染零成本回退；挂点 = ToolLine 展开区——#752 §2.4 的「附件卡位」挂载缺数据通道[media 引用无 producer 工具名路由键]，随首个需要的插件再扩）+ `index.ts` = 收录清单（显式 import 各插件 web.ts 一行，现含 autofigure + research）+ `deps.ts` = #799 vue 运行时依赖桥（#791 plugins 树禁裸包名 import 铁律的前端对称面；type-only import 不受限）。web 面组件本体在仓库根 `plugins/<id>/`（web.ts + components/，vite/tsconfig 双端 include 分工：server tsconfig exclude web.ts+components/，frontend include 之）。
 - `chat/` — chat 核心三件套（#793 · #730 §4.1，REST+SSE 换轨；网关协议机/设备配对/升级编排死区已删）：
   `projection.ts`（投影归约器纯函数——`applyEvent` 事件增量 / `fromProjection` 投影行双入口同形状，
@@ -35,7 +35,7 @@
   `ChatHeader`/`ChatStream`/`ChatComposer`（#980 全内嵌舱——单胶囊体框外零控件：舱内底排
   📎/推理强度三段滑块/模型 chip 上拉菜单/圆形发送键，预览条内移第一排；选择器面 props-in/emits-out，
   模型清单与能力注记全部 props 注入，写面上抛宿主）/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName；#920 起 Dock 按 source==='experiment-plan' 分流 `PlanApprovalCard`——W4 实验方案人审卡，plan.text 经 MarkdownRenderer 渲染）
-  + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960/#961 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；#961 T3 起：hasExec 标记（turn.files 帧随带，true 才落键）时卡底一行「本轮含 Shell 调用，其文件副作用不在此列」——D6 动态提示只断言「有调用」；#962 T4 视觉定稿（A3 变体 B「分组卡」）：按 op 三节分组（空缺节跳过，行序 = 组序 × 组内原序）+ 药丸徽标（created 绿 success / modified 蓝 primary / deleted 灰 secondary）+ 目录 rtl-ellipsis 弱化 / 文件名 mono 主文本））。
+  + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960/#961 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；#961 T3 起：hasExec 标记（turn.files 帧随带，true 才落键）时卡底一行「本轮含 Shell 调用，其文件副作用不在此列」——D6 动态提示只断言「有调用」；#962 T4 视觉定稿（A3 变体 B「分组卡」）：按 op 三节分组（空缺节跳过，行序 = 组序 × 组内原序）+ 药丸徽标（created 绿 success / modified 蓝 primary / deleted 灰 secondary）+ 目录 rtl-ellipsis 弱化 / 文件名 mono 主文本））+ `ReflectionBlock`（#1080 RF-T04 结构化反思块——挂 ChatMessageItem 正文之后、媒体/产物卡之前，恒在折叠条外：按展示引用（attachmentsJson presentations）读取完整五部分并全文渲染（不受 4KiB 工具行截断），证据状态/事实-推测区分/版本 hash 呈现；浏览器完整渲染后向 `/reflections/displays/:id/ack` 回执，展示未绑定终态消息时不回执）。
 
 - 模型配置页统一管理平台默认端点只读卡片、六预设 BYOK 表单、模型列表、保存前试连、删除影响面与插件 LLM 指派（含 judge）。API key 编辑留空保持原值；响应只显示掩码或 key_error，不回填明文。
 
