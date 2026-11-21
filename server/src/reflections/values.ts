@@ -38,9 +38,22 @@ export const REFLECTION_DRAFT_STATUSES = [
 ] as const
 export type ReflectionDraftStatus = (typeof REFLECTION_DRAFT_STATUSES)[number]
 
-// 证据状态：preparing（在飞待落行）| valid（服务端已核验）| not_ready（截断外/摘要/未解析）。
+// 证据状态：preparing（在飞待落行）| valid（服务端已核验）| not_ready（截断外/摘要/未解析/
+// 来源变化或删除）。#1084：来源失效原因进入 not_ready，读门据此封锁摘录。
 export const REFLECTION_EVIDENCE_STATUSES = ['preparing', 'valid', 'not_ready'] as const
 export type ReflectionEvidenceStatus = (typeof REFLECTION_EVIDENCE_STATUSES)[number]
+
+// #1084（RF-T08）：来源失效原因——与触发器和业务写入共用单一来源。这些原因的证据摘录与
+// 正文中逐字复制的来源片段都不得再交付（读门同步封锁，outbox 负责物理清理）。
+export const REFLECTION_SOURCE_INVALID_REASONS = [
+  'source_changed',
+  'source_deleted',
+  'source_unavailable',
+] as const
+export type ReflectionSourceInvalidReason = (typeof REFLECTION_SOURCE_INVALID_REASONS)[number]
+
+export const REFLECTION_INVALID_EXCERPT_PLACEHOLDER = '[来源已失效，待复核]'
+export const REFLECTION_INVALID_FRAGMENT_PLACEHOLDER = '[来源已失效]'
 
 // 展示状态（父规格 I5/I7）：active 待 ack | acked 已完整渲染 | revoked 被新版本替代 |
 // expired 过窗 | deleted 专属正文已清理（只留占位）。

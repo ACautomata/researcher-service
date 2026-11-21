@@ -18,7 +18,8 @@
 // skill_packages/skill_files/skill_enablements）。
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
-export const SCHEMA_VERSION = 21
+// 21→22 #1084 RF-T08 来源变更闭环：record evidence + cleanup outbox（additive）。
+export const SCHEMA_VERSION = 22
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -936,6 +937,54 @@ CREATE INDEX IF NOT EXISTS "reflection_idempotency_ownerId_idx" ON "reflection_i
   if (!presentationColumns.some((c) => c.name === 'ackTurn')) {
     db.exec('ALTER TABLE "reflection_presentations" ADD COLUMN "ackTurn" INTEGER')
   }
+
+  // 21→22 #1084（RF-T08）来源变更闭环两表（additive；DDL 镜像 prisma/init.sql）：
+  // record evidence 独立于发起会话（无 session/message 外键），cleanup outbox 供可靠重放。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "reflection_record_evidence" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "recordId" TEXT NOT NULL,
+    "recordVersion" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "toolCallId" TEXT,
+    "region" TEXT NOT NULL,
+    "startCp" INTEGER,
+    "endCp" INTEGER,
+    "excerpt" TEXT NOT NULL,
+    "regionHash" TEXT,
+    "contentVersion" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'valid',
+    "reason" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_record_evidence_recordId_fkey" FOREIGN KEY ("recordId") REFERENCES "reflection_records" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_cleanup_outbox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "kind" TEXT NOT NULL DEFAULT 'source_cleanup',
+    "excerpt" TEXT NOT NULL,
+    "state" TEXT NOT NULL DEFAULT 'pending',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "reflection_record_evidence_recordId_recordVersion_position_key" ON "reflection_record_evidence"("recordId", "recordVersion", "position");
+CREATE INDEX IF NOT EXISTS "reflection_record_evidence_ownerId_sessionId_messageId_idx" ON "reflection_record_evidence"("ownerId", "sessionId", "messageId");
+CREATE INDEX IF NOT EXISTS "reflection_record_evidence_messageId_idx" ON "reflection_record_evidence"("messageId");
+CREATE INDEX IF NOT EXISTS "reflection_cleanup_outbox_state_createdAt_idx" ON "reflection_cleanup_outbox"("state", "createdAt");
+CREATE INDEX IF NOT EXISTS "reflection_cleanup_outbox_messageId_idx" ON "reflection_cleanup_outbox"("messageId");
+-- 触发器按 messageId/draftId 定位（既有复合索引前缀不覆盖单列查询）。
+CREATE INDEX IF NOT EXISTS "reflection_evidence_messageId_idx" ON "reflection_evidence"("messageId");
+CREATE INDEX IF NOT EXISTS "reflection_presentations_draftId_idx" ON "reflection_presentations"("draftId");
+CREATE INDEX IF NOT EXISTS "reflection_grants_draftId_idx" ON "reflection_grants"("draftId");
+`)
 }
 
 // baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。

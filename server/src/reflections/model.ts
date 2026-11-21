@@ -220,6 +220,44 @@ export interface CommitResult {
   readonly evidenceStatus: string
 }
 
+// ---- 正式记录（#1084 · RF-T08 管理读取 / 失效复核面）----
+
+export interface RecordEvidenceRecord {
+  readonly position: number
+  readonly sessionId: string
+  readonly messageId: string | null
+  readonly toolCallId: string | null
+  readonly region: ReflectionRegion
+  readonly startCp: number | null
+  readonly endCp: number | null
+  readonly excerpt: string
+  readonly regionHash: string | null
+  readonly contentVersion: string | null
+  readonly status: 'valid' | 'invalid'
+  readonly reason?: string
+}
+
+export interface RecordRevisionMeta {
+  readonly version: number
+  readonly createdAt: string
+}
+
+export interface RecordDetail {
+  readonly recordId: string
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly title: string
+  readonly category: string
+  readonly body: DraftBody
+  readonly status: string
+  readonly evidenceStatus: string
+  readonly currentRevision: number
+  readonly revision: RecordRevisionMeta | null
+  readonly evidence: readonly RecordEvidenceRecord[]
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
 export type CommitOutcome =
   | { readonly result: CommitResult; readonly idempotent: boolean }
   | { readonly error: 'not_found' | 'revoked' | 'expired' | 'limit' | 'conflict' }
@@ -335,6 +373,15 @@ export interface ReflectionStore {
   }): Promise<void>
   /** 证据/版本失效时撤销该草稿的未消费授权（已消费的不动）。 */
   revokeActiveGrants(ownerId: string, draftId: string): Promise<void>
+
+  // ---- 正式记录（#1084 · RF-T08）----
+  /**
+   * 检索正式记录。experience = 仅 active + evidenceStatus=valid（失效记录退出主动使用）；
+   * management = 全部生命周期/证据状态（待复核结论仍可管理查看）。
+   */
+  listRecords(ownerId: string, options: { purpose: 'experience' | 'management'; limit: number }): Promise<RecordDetail[]>
+  /** 单条记录（本人）；不存在/越权同形 null。version 指定时正文取该 revision 快照。 */
+  getRecord(ownerId: string, recordId: string, version?: number): Promise<RecordDetail | null>
 }
 
 // ---- 结果 ----

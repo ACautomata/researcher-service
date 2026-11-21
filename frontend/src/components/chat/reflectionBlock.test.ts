@@ -97,6 +97,22 @@ describe('ReflectionBlock', () => {
     expect(ackReflectionDisplay).not.toHaveBeenCalled()
   })
 
+  it('来源失效 → 待复核徽标、占位摘录、不可确认且不 ack（#1084）', async () => {
+    getReflectionDisplay.mockResolvedValue(displayWith({
+      status: 'revoked',
+      invalidated: true,
+      confirmable: false,
+      notConfirmableReason: 'evidence_changed',
+      evidence: [{ position: 1, sessionId: 's1', messageId: 'm1', region: 'content', start: 0, end: 4, excerpt: '[来源已失效，待复核]', status: 'not_ready', reason: 'source_changed' }],
+    }))
+    const w = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
+    await flushPromises()
+    expect(w.get('[data-test="reflection-invalidated"]').text()).toContain('待复核')
+    expect(w.find('[data-test="reflection-not-confirmable"]').exists()).toBe(true)
+    expect(w.text()).toContain('[来源已失效，待复核]')
+    expect(ackReflectionDisplay).not.toHaveBeenCalled()
+  })
+
   it('消息未绑定（无 messageId）→ 不 ack', async () => {
     getReflectionDisplay.mockResolvedValue(displayWith({ messageId: null }))
     mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
