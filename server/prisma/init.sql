@@ -163,6 +163,21 @@ CREATE TABLE "session_history_versions" (
 );
 
 -- CreateTable
+CREATE TABLE "history_request_budgets" (
+    "requestId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "lastRunId" TEXT NOT NULL,
+    "calls" INTEGER NOT NULL DEFAULT 0,
+    "waitedMs" INTEGER NOT NULL DEFAULT 0,
+    "returnedBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "history_request_budgets_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "history_request_budgets_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
 CREATE TABLE "checkpoints" (
     "threadId" TEXT NOT NULL,
     "checkpointNs" TEXT NOT NULL DEFAULT '',
@@ -466,6 +481,12 @@ CREATE INDEX "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON
 
 -- CreateIndex
 CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
+
+-- CreateIndex
+CREATE INDEX "history_request_budgets_sessionId_updatedAt_idx" ON "history_request_budgets"("sessionId", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "history_request_budgets_ownerId_updatedAt_idx" ON "history_request_budgets"("ownerId", "updatedAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");

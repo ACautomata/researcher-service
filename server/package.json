@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "docs": "node scripts/docs.mjs",
     "prebuild": "prisma generate",
-    "build": "tsc -p tsconfig.build.json && rm -rf dist/server/src/generated && cp -R src/generated dist/server/src/generated",
+    "build": "tsc -p tsconfig.build.json && rm -rf dist/server/src/generated && cp -R src/generated dist/server/src/generated && cp src/sessions/history/sqliteCore.cjs src/sessions/history/executorChild.cjs dist/server/src/sessions/history/",
     "start": "node dist/server/src/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

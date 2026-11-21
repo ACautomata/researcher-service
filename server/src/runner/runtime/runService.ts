@@ -1,5 +1,5 @@
 import { createSessionHistoryTool, runWithHistoryContext } from '../historyTool'
-import type { SessionHistoryService } from '../../sessions/history/service'
+import type { HistoryRuntimePort } from '../../sessions/history/model'
 import { BackgroundExecService, withBackgroundRun, resultMessageId } from '../background/service'
 import type { BackgroundExec } from '../../generated/prisma/client'
 import { NextStepSuggestions } from '../../sessions/nextStepSuggestion'
@@ -140,6 +140,8 @@ export interface RunCommand {
   readonly ownerId: string
   readonly username: string
   readonly kind: 'message' | 'resume' | 'recover'
+  /** 可信触发用户消息行 id（稳定主请求身份，≠ 可重建的 runId）：额度跨恢复/图重建延续。 */
+  readonly triggerMessageId?: string
   /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参）；
    *  #788：'plugin-execute' = 插件命令 {execute} outcome（直达本插件工具执行面，不经 agent）；
    *  'chaoxing-query' = /course-search、/topic-search 内置命令（直达学习领域服务，不经 agent） */
@@ -183,8 +185,8 @@ export interface RunSnapshot {
 export type EventPublisher = Pick<StreamHub, 'publish'>
 
 export interface RunServiceDeps {
-  /** RF-T01 内部集成接缝；生产 assembly 不注入，等待 RF-T12 完整门禁。 */
-  readonly history?: Pick<SessionHistoryService, 'execute'>
+  /** RF-T01/T03 内部集成接缝；生产 assembly 不注入，等待 RF-T12 完整门禁。 */
+  readonly history?: HistoryRuntimePort
   readonly background?: BackgroundExecService
   readonly chaoxing?: ChaoxingService
   readonly prisma: PrismaClient
@@ -413,6 +415,7 @@ export class RunService {
   // 停清扫定时器（装配层 close 调用；幂等）
   dispose(): void {
     this.nextStepSuggestions.dispose()
+    this.deps.history?.dispose?.()
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer)
       this.sweepTimer = undefined
@@ -828,6 +831,8 @@ export class RunService {
     // 内存态缺失（控制面重启/跨进程 resume）→ 从持久化状态推导（#747 A 节硬约束：
     // 「图拓扑必须可由持久化状态推导」——最新 checkpoint 带 pending interrupt ⇔ interrupted）。
     // recover 跳过两者（恢复面权威：重放判据已在 normalizeReplay 核验）。
+    // #1079：resume 时记录被恢复的 run 身份（额度账本精确绑定源）。
+    let resumeOfRunId: string | undefined
     if (cmd.kind === 'resume') {
       let snap = this.runs.get(cmd.sessionId)
       if (!snap) {
@@ -841,6 +846,8 @@ export class RunService {
       if (!snap || (snap.state !== 'interrupted' && snap.state !== 'suspended')) {
         throw fail(CODE.RUN_ALREADY_RESUMED)
       }
+      // #1079：被恢复的 run 身份用于精确绑定原主请求额度（内存态快照优先）。
+      resumeOfRunId = this.runs.get(cmd.sessionId)?.runId ?? snap.runId
       this.pendingApprovals.delete(cmd.sessionId) // 升级落定，48h 死线随清
     } else if (cmd.kind === 'message') {
       // #747 C 节「running 全端禁输入、interrupt 全端可审批」的内核权威面：interrupted 态
@@ -866,6 +873,32 @@ export class RunService {
     if (cmd.teammateId) {
       const teammate = await this.deps.prisma.teammate.findUnique({ where: { id: cmd.teammateId } })
       if (!teammate || teammate.archivedAt || teammate.threadId !== cmd.sessionId || teammate.parentSessionId !== cmd.parentSessionId || session.ownerId !== cmd.ownerId) throw fail(CODE.SESSION_NOT_FOUND)
+    }
+
+    // #1079 · 稳定主请求身份：resolve 在会话串行链内、图构建之前完成；resume/recover 从持久
+    // 账本沿用原 triggerMessageId，不能可靠恢复则关闭本 run 的历史增强（不重发额度）。
+    const historyEligible = !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
+    let historyRequestId: string | undefined
+    let historyLeader = false
+    if (this.deps.history && historyEligible) {
+      try {
+        historyRequestId = this.deps.history.resolveRunRequest
+          ? await this.deps.history.resolveRunRequest({
+              kind: cmd.kind,
+              runId: cmd.runId,
+              ownerId: session.ownerId,
+              sessionId: cmd.sessionId,
+              ...(cmd.triggerMessageId ? { triggerMessageId: cmd.triggerMessageId } : {}),
+              ...(resumeOfRunId ? { resumeOfRunId } : {}),
+            })
+          : undefined
+      } catch {
+        // 增强失败不终止原任务：无法可靠恢复额度时只关闭本次历史能力。
+        // 不把底层异常文本（可能含连接串/路径）写入日志。
+        historyRequestId = undefined
+        console.warn(`[runner] history identity resolve failed: run=${cmd.runId}`)
+      }
+      historyLeader = historyRequestId !== undefined || !this.deps.history.requiresRequestIdentity
     }
 
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
@@ -980,7 +1013,7 @@ export class RunService {
         })
       : this.getOrBuildGraph({
           threadId: cmd.sessionId,
-          historyLeader: !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId,
+          historyLeader,
           configVersion: snapshot.version,
           policy,
           model,
@@ -1253,6 +1286,7 @@ export class RunService {
         await withBackgroundRun(cmd, controller.signal, () => runWithRunContext(cmd.runId, async () => {
           await runWithHistoryContext({ context: { ownerId: cmd.ownerId, currentSessionId: cmd.sessionId,
             role: session.isTeammate || cmd.teammateId || cmd.parentSessionId ? 'teammate' : 'leader',
+            ...(historyRequestId ? { requestId: historyRequestId } : {}),
           }, signal: controller.signal }, () => runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
               ...invocation,

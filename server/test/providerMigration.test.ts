@@ -17,6 +17,7 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 import { runDbScript } from './runDbScript'
 import { ENDPOINT_PRESETS } from '../src/models/presets'
+import { SCHEMA_VERSION } from '../scripts/lib/incremental-schema.mjs'
 
 function makeDir(): string {
   return mkdtempSync(path.join(tmpdir(), `mm-v16-${process.pid}-`))
@@ -167,7 +168,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
       expect(cols).toEqual(['id', 'ownerId', 'providerId', 'presetId', 'credentialCipher', 'modelsJson', 'createdAt'])
       // 白名单表整表退役（含其种子行）
       expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='provider_endpoints'`).get()).toBeUndefined()
-      expect(db.pragma('user_version', { simple: true })).toBe(19)
+      expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
       // 退役 seed id 'minimax' 引用 remap：无自建行的 owner 改指平台虚拟条目；有自建行不动
       const pref = (id: string): string | null =>
         (db.prepare(`SELECT "preferredModelJson" p FROM "sessions" WHERE id=?`).get(id) as { p: string | null }).p
@@ -219,7 +220,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
     const db2 = new Database(dbPath)
     try {
       expect(rows(db2)).toEqual(before)
-      expect(db2.pragma('user_version', { simple: true })).toBe(19)
+      expect(db2.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
     } finally {
       db2.close()
     }
@@ -237,7 +238,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
       const cols = (db.prepare('PRAGMA table_info(model_providers)').all() as Array<{ name: string }>).map((c) => c.name)
       expect(cols).toContain('presetId')
       expect(cols).not.toContain('containerId')
-      expect(db.pragma('user_version', { simple: true })).toBe(19)
+      expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
     } finally {
       db.close()
     }

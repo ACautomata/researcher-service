@@ -552,7 +552,8 @@ export class SessionService {
       })
       row = accepted.message
       previousSuggestion = accepted.previous
-      cmd = { ...cmd, suggestionVersion: accepted.version, suggestionUserText: p.content }
+      // #1079：可信 triggerMessageId = 刚落的 user 行 id（稳定主请求身份，跨 resume/recover）。
+      cmd = { ...cmd, suggestionVersion: accepted.version, suggestionUserText: p.content, triggerMessageId: row.id }
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
         // 已知毫秒窗口（R4 记录备查）：败方经此分支拿 replay 应答后，若胜方 dispatch ack
