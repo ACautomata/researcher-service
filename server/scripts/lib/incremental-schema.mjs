@@ -985,6 +985,36 @@ CREATE INDEX IF NOT EXISTS "reflection_evidence_messageId_idx" ON "reflection_ev
 CREATE INDEX IF NOT EXISTS "reflection_presentations_draftId_idx" ON "reflection_presentations"("draftId");
 CREATE INDEX IF NOT EXISTS "reflection_grants_draftId_idx" ON "reflection_grants"("draftId");
 `)
+
+  // 21→22 回填：#1081 的正式记录只把证据快照写进 revision.evidenceJson；结构化表新增后
+  // 从当前 revision 幂等回填，使触发器/清理对升级前已提交记录同样生效（INSERT OR IGNORE
+  // 依赖上面唯一索引；json_each 逐条展开证据数组）。
+  db.exec(`
+INSERT OR IGNORE INTO "reflection_record_evidence"
+  ("id", "recordId", "recordVersion", "position", "ownerId", "sessionId", "messageId", "toolCallId",
+   "region", "startCp", "endCp", "excerpt", "regionHash", "contentVersion", "status", "reason", "createdAt")
+SELECT lower(hex(randomblob(16))), r."id", rev."version",
+  CAST(json_extract(j.value, '$.position') AS INTEGER),
+  r."ownerId",
+  json_extract(j.value, '$.sessionId'),
+  json_extract(j.value, '$.messageId'),
+  json_extract(j.value, '$.toolCallId'),
+  json_extract(j.value, '$.region'),
+  CAST(json_extract(j.value, '$.startCp') AS INTEGER),
+  CAST(json_extract(j.value, '$.endCp') AS INTEGER),
+  json_extract(j.value, '$.excerpt'),
+  json_extract(j.value, '$.regionHash'),
+  json_extract(j.value, '$.contentVersion'),
+  CASE WHEN json_extract(j.value, '$.status') = 'valid' THEN 'valid' ELSE 'invalid' END,
+  json_extract(j.value, '$.reason'),
+  CURRENT_TIMESTAMP
+FROM "reflection_records" r
+JOIN "reflection_revisions" rev ON rev."recordId" = r."id" AND rev."version" = r."currentRevision"
+JOIN json_each(rev."evidenceJson") j
+WHERE json_valid(rev."evidenceJson")
+  AND json_extract(j.value, '$.sessionId') IS NOT NULL
+  AND json_extract(j.value, '$.position') IS NOT NULL;
+`)
 }
 
 // baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。

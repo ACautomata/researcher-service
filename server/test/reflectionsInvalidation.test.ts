@@ -52,6 +52,7 @@ interface CommittedFixture {
 
 describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）', () => {
   let dir: string
+  let dbPath: string
   let prisma: PrismaClient
   let runtime: ReflectionsRuntime
   let cleanup: ReflectionCleanupService
@@ -60,7 +61,7 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
 
   beforeAll(async () => {
     dir = mkdtempSync(path.join(tmpdir(), `panel-1084-${process.pid}-`))
-    const dbPath = path.join(dir, 'test.db')
+    dbPath = path.join(dir, 'test.db')
     const sqlite = new Database(dbPath)
     sqlite.exec(INIT_SQL)
     sqlite.exec(HISTORY_TRIGGERS_SQL)
@@ -281,12 +282,14 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
       purpose: 'management',
       targets: [{ record_id: f.recordId }],
     })
-    const detail = (read.records as Array<{ body: { problem: string; causes: Array<{ text: string }> }; evidence: Array<{ status: string; excerpt: string }> }>)[0]!
-    expect(detail.body.problem).not.toContain(EXCERPT)
-    expect(detail.body.causes[0]!.text).not.toContain(EXCERPT)
-    expect(detail.body.problem).toContain('来源已失效')
+    const detail = (read.records as Array<{ body_ref: string; version: number; evidence: Array<{ status: string; excerpt: string }> }>)[0]!
+    expect(detail.body_ref).toContain('reflection_record:')
     expect(detail.evidence[0]).toMatchObject({ status: 'invalid' })
     expect(detail.evidence[0]!.excerpt).not.toContain(EXCERPT)
+    const recordText = await runtime.service.recordBodyText(ownerId, f.recordId, detail.version)
+    expect(recordText).not.toBeNull()
+    expect(recordText!).not.toContain(EXCERPT)
+    expect(recordText!).toContain('来源已失效')
 
     const display = await runtime.service.getDisplay(ownerId, pendingDisplayId)
     expect(display).toMatchObject({ invalidated: true, confirmable: false })
@@ -333,6 +336,7 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
     const revisions = await prisma.reflectionRevision.findMany({ where: { recordId: f.recordId } })
     expect(revisions.length).toBeGreaterThan(0)
     expect(revisions.every((r) => !r.bodyJson.includes(EXCERPT))).toBe(true)
+    expect(revisions.every((r) => !r.evidenceJson.includes(EXCERPT))).toBe(true)
     const draft = await prisma.reflectionDraft.findUniqueOrThrow({ where: { id: f.draftId } })
     expect(draft.contentJson).not.toContain(EXCERPT)
     const presentation = await prisma.reflectionPresentation.findUniqueOrThrow({ where: { displayId: f.displayId } })
@@ -340,6 +344,10 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
     const evidence = await prisma.reflectionEvidence.findFirstOrThrow({ where: { draftId: f.draftId } })
     expect(evidence.excerpt).not.toContain(EXCERPT)
     expect(await prisma.reflectionCleanupOutbox.count({ where: { state: 'pending' } })).toBe(0)
+    // 清理完成后 outbox 不再保留来源摘录副本。
+    const doneRows = await prisma.reflectionCleanupOutbox.findMany({ where: { state: 'done' } })
+    expect(doneRows.length).toBeGreaterThan(0)
+    expect(doneRows.every((row) => row.excerpt === '')).toBe(true)
 
     // 幂等二跑：没有 pending 行，且正文不再变化。
     const before = (await prisma.reflectionRecord.findUniqueOrThrow({ where: { id: f.recordId } })).contentJson
@@ -407,9 +415,103 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
     // 清理后管理视图仍可查看待复核结论，且正文不含来源原文。
     await cleanup.processPending()
     const read = await runtime.service.execute(leader(f.sessionId), { operation: 'read', purpose: 'management', targets: [{ record_id: f.recordId }] })
-    const detail = (read.records as Array<{ evidence_status: string; body: { problem: string } }>)[0]!
+    const detail = (read.records as Array<{ evidence_status: string; version: number; body_ref: string }>)[0]!
     expect(detail.evidence_status).toBe('review_required')
-    expect(detail.body.problem).not.toContain(EXCERPT)
+    expect(detail.body_ref).toContain('reflection_record:')
+    const recordText = await runtime.service.recordBodyText(ownerId, f.recordId, detail.version)
+    expect(recordText).not.toBeNull()
+    expect(recordText!).not.toContain(EXCERPT)
+  })
+
+  it('多证据：失效来源退出主动使用，仍有效的来源在管理读取中保留', async () => {
+    const sessionId = await createSession('多证据')
+    const excerptA = '参数校验缺少边界检查'
+    const excerptB = '写文件后没有运行测试'
+    const messageA = await addMessage({ sessionId, role: 'assistant', content: `来源甲：${excerptA}。` })
+    const messageB = await addMessage({ sessionId, role: 'assistant', content: `来源乙：${excerptB}。` })
+    const created = await runtime.service.execute(leader(sessionId), {
+      ...DRAFT,
+      problem: `问题：${excerptA}，并且${excerptB}。`,
+      causes: [{ text: `原因：${excerptA} / ${excerptB}。`, kind: 'fact', evidence: [1, 2] }],
+      evidence: [
+        { session_id: sessionId, message_id: messageA, region: 'content', excerpt: excerptA },
+        { session_id: sessionId, message_id: messageB, region: 'content', excerpt: excerptB },
+      ],
+    })
+    expect(created.outcome).toBe('success')
+    const draftRef = created.draft as { draft_id: string; version: number; status: string }
+    expect(draftRef.status).toBe('pending')
+    await presentAndAck(sessionId, draftRef.draft_id, draftRef.version)
+    const triggerId = await grantFor(sessionId, draftRef.draft_id)
+    const committed = await runtime.service.execute(leader(sessionId, triggerId), { operation: 'commit', draft_id: draftRef.draft_id, version: draftRef.version })
+    expect(committed.outcome).toBe('success')
+    const recordId = (committed.record as { record_id: string }).record_id
+
+    // 只删来源乙：记录待复核，但来源甲仍有效、仍可查看。
+    await prisma.sessionMessage.delete({ where: { id: messageB } })
+    const record = await prisma.reflectionRecord.findUniqueOrThrow({ where: { id: recordId } })
+    expect(record.evidenceStatus).toBe('review_required')
+    const read = await runtime.service.execute(leader(sessionId), { operation: 'read', purpose: 'management', targets: [{ record_id: recordId }] })
+    const detail = (read.records as Array<{
+      body_ref: string
+      version: number
+      evidence: Array<{ position: number; status: string; excerpt: string }>
+    }>)[0]!
+    expect(detail.body_ref).toContain('reflection_record:')
+    expect(detail.evidence[0]).toMatchObject({ position: 1, status: 'valid' })
+    expect(detail.evidence[0]!.excerpt).toContain(excerptA)
+    expect(detail.evidence[1]).toMatchObject({ position: 2, status: 'invalid' })
+    expect(detail.evidence[1]!.excerpt).not.toContain(excerptB)
+    const recordText = await runtime.service.recordBodyText(ownerId, recordId, detail.version)
+    expect(recordText).not.toBeNull()
+    expect(recordText!).toContain(excerptA)
+    expect(recordText!).not.toContain(excerptB)
+
+    await cleanup.processPending()
+    const stored = await prisma.reflectionRecord.findUniqueOrThrow({ where: { id: recordId } })
+    expect(stored.contentJson).toContain(excerptA)
+    expect(stored.contentJson).not.toContain(excerptB)
+  })
+
+  it('schema v22 从 revision.evidenceJson 幂等回填结构化证据（#1081 旧行）', async () => {
+    const f = await committedFixture('回填')
+    // 模拟 #1084 之前的已提交记录：只有 revision.evidenceJson，没有结构化证据行。
+    await prisma.reflectionRecordEvidence.deleteMany({ where: { recordId: f.recordId } })
+    expect(await prisma.reflectionRecordEvidence.count({ where: { recordId: f.recordId } })).toBe(0)
+
+    const { runIncrementalSchema } = await import('../scripts/lib/incremental-schema.mjs')
+    const db = new Database(dbPath)
+    try {
+      runIncrementalSchema(db)
+      runIncrementalSchema(db) // 幂等二跑
+    } finally {
+      db.close()
+    }
+    const rows = await prisma.reflectionRecordEvidence.findMany({ where: { recordId: f.recordId }, orderBy: { position: 'asc' } })
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows[0]).toMatchObject({ sessionId: f.sessionId, messageId: f.sourceMessageId, status: 'valid' })
+  })
+
+  it('并发读取与来源失效：不交付「已撤销展示 + 未封锁正文」的混合快照（AC5）', async () => {
+    const f = await committedFixture('并发')
+    const pending = await createPendingDraft(f.sessionId, f.sourceMessageId)
+    const displayId = await presentAndAck(f.sessionId, pending.draftId, pending.version)
+    const reads = Array.from({ length: 12 }, () => runtime.service.getDisplay(ownerId, displayId))
+    const [, ...settled] = await Promise.allSettled([
+      sessionService().rewindSession({ id: ownerId, role: 'user' }, f.sessionId, { messageId: f.firstAssistantId, scope: 'chat' }),
+      ...reads,
+    ])
+    for (const result of settled) {
+      if (result.status !== 'fulfilled') continue
+      const shown = result.value as { status?: string; invalidated?: boolean; body?: { problem: string } | null } | null
+      if (!shown) continue
+      // 失效提交后读到的快照必须同时具备 revoked/invalidated；不得出现旧证据的未封锁正文。
+      if (shown.status === 'revoked') expect(shown.invalidated).toBe(true)
+      if (shown.invalidated) expect(shown.body?.problem ?? '').not.toContain(EXCERPT)
+    }
+    const after = await runtime.service.getDisplay(ownerId, displayId)
+    expect(after).toMatchObject({ invalidated: true, confirmable: false })
+    expect(after!.body!.problem).not.toContain(EXCERPT)
   })
 
   it('管理视图保留有效来源（补证草稿可见），不把旧记录当自证事实', async () => {

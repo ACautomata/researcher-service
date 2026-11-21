@@ -6,6 +6,7 @@
 import {
   blockedDraftExcerpts,
   blockedRecordExcerpts,
+  type BodyTextView,
   evidenceViews,
   isSourceInvalidReason,
   matchExcerpt,
@@ -43,6 +44,7 @@ import {
   REFLECTION_CONFIRMATION_DECISIONS,
   reflectionBodyRef,
   reflectionDraftRef,
+  reflectionRecordRef,
 } from './values'
 
 export interface ReflectionServiceOptions {
@@ -139,7 +141,7 @@ export class ReflectionService {
     if (request.purpose === 'experience') {
       return success('search', {
         purpose: 'experience',
-        records: matchedRecords.map(({ record, body, blocked }) => recordSummary(record, body, blocked)),
+        records: matchedRecords.map(({ record, body }) => recordSummary(record, body)),
         count: matchedRecords.length,
       }, '经验检索仅含已确认且证据有效的记录；来源失效记录已退出主动使用，可在 management 查看待复核状态。')
     }
@@ -156,8 +158,8 @@ export class ReflectionService {
       .filter(({ body }) => matchesBody(body, query, request.category, request.scope))
     return success('search', {
       purpose: 'management',
-      records: matchedRecords.map(({ record, body, blocked }) => recordSummary(record, body, blocked)),
-      drafts: filtered.map(({ draft, body, blocked }) => draftSummary(draft, body, blocked)),
+      records: matchedRecords.map(({ record, body }) => recordSummary(record, body)),
+      drafts: filtered.map(({ draft, body }) => draftSummary(draft, body)),
       count: matchedRecords.length + filtered.length,
     }, '管理视图同时返回草稿与正式记录（含 review_required 待复核）；未确认草稿不进入经验匹配。')
   }
@@ -175,27 +177,28 @@ export class ReflectionService {
           recordsOut.push({ record_id: target.record_id, status: 'not_found' })
           continue
         }
-        if (target.version !== undefined && target.version !== (record.revision?.version ?? record.currentRevision)) {
+        if (target.version !== undefined && target.version !== (effectiveVersion(record))) {
           conflict = true
           recordsOut.push({
             record_id: record.recordId,
             status: 'conflict',
             expected_version: target.version,
-            actual_version: record.revision?.version ?? record.currentRevision,
+            actual_version: effectiveVersion(record),
           })
           continue
         }
         // 读门同步封锁：来源失效摘录与正文中逐字复制的来源片段都不返回（等 outbox 清理是纵深）。
+        // 正文只给引用（I7：工具输出/checkpoint 不存完整反思正文），模型边界由解引用临时展开。
         const blocked = blockedRecordExcerpts(record.evidence)
         const body = scrubDraftBody(record.body, blocked)
         recordsOut.push({
           record_id: record.recordId,
-          version: record.revision?.version ?? record.currentRevision,
+          version: effectiveVersion(record),
           status: record.status,
           evidence_status: record.evidenceStatus,
           title: body.title,
           category: body.category,
-          body,
+          body_ref: reflectionRecordRef(record.recordId, effectiveVersion(record)),
           evidence: sanitizedRecordEvidenceViews(record.evidence),
           ...(blocked.length > 0 ? { redacted_fragments: blocked.length } : {}),
         })
@@ -203,9 +206,10 @@ export class ReflectionService {
       }
 
       const draft = await this.store.getDraft(context.ownerId, target.draft_id)
-      // 未确认草稿永不进入 experience 匹配/读取（父规格 I3/I6）。
+      // 未确认草稿永不进入 experience 匹配/读取（父规格 I3/I6）；按目标顺序逐项返回结果，
+      // 不存在/越权/experience 一律同形 not_found（I6 防探测）。
       if (!draft || request.purpose === 'experience') {
-        if (request.purpose === 'management') draftsOut.push({ draft_id: target.draft_id, status: 'not_found' })
+        draftsOut.push({ draft_id: target.draft_id, status: 'not_found' })
         continue
       }
       if (target.version !== undefined && target.version !== draft.version) {
@@ -672,6 +676,19 @@ export class ReflectionService {
     return formatDraftBody(display.body, display.evidence, display.version)
   }
 
+  /** 模型输入解引用：正式记录正文引用临时展开（#1084；读门已按失效摘录清理）。 */
+  async recordBodyText(ownerId: string, recordId: string, version: number): Promise<string | null> {
+    const record = await this.store.getRecord(ownerId, recordId, version)
+    if (!record) return null
+    if (record.status === 'deleted' || record.evidenceStatus === 'invalid') return null
+    const blocked = blockedRecordExcerpts(record.evidence)
+    return formatDraftBody(
+      scrubDraftBody(record.body, blocked),
+      sanitizedRecordEvidenceViews(record.evidence),
+      version,
+    )
+  }
+
   /** 模型输入解引用：management read 的草稿正文引用临时展开（版本须仍匹配）。 */
   async draftBodyText(ownerId: string, draftId: string, version: number): Promise<string | null> {
     const draft = await this.store.getDraft(ownerId, draftId)
@@ -734,24 +751,28 @@ function pendingRecord(p: {
   }
 }
 
-function draftSummary(draft: DraftRecord, body: DraftBody, blocked: readonly string[]): Record<string, unknown> {
+function effectiveVersion(record: RecordDetail): number {
+  return record.revision?.version ?? record.currentRevision
+}
+
+function draftSummary(draft: DraftRecord, body: DraftBody): Record<string, unknown> {
   return {
     draft_id: draft.id,
     version: draft.version,
     status: draft.status,
-    title: scrubSourceFragment(body.title, blocked),
+    title: body.title,
     category: draft.body.category,
     updated_at: draft.updatedAt,
   }
 }
 
-function recordSummary(record: RecordDetail, body: DraftBody, blocked: readonly string[]): Record<string, unknown> {
+function recordSummary(record: RecordDetail, body: DraftBody): Record<string, unknown> {
   return {
     record_id: record.recordId,
-    version: record.revision?.version ?? record.currentRevision,
+    version: effectiveVersion(record),
     status: record.status,
     evidence_status: record.evidenceStatus,
-    title: scrubSourceFragment(body.title, blocked),
+    title: body.title,
     category: record.category,
     updated_at: record.updatedAt,
   }
@@ -837,7 +858,7 @@ function normalizeQueryText(text: string): string {
   return text.normalize('NFKC').toLowerCase()
 }
 
-export function formatDraftBody(body: DraftBody, evidence: ReturnType<typeof evidenceViews>, version: number): string {  const lines = [
+export function formatDraftBody(body: DraftBody, evidence: readonly BodyTextView[], version: number): string {  const lines = [
     `【反思草稿 v${version}】${body.title}`,
     `类别：${body.category}`,
     `一、问题与影响\n${body.problem}`,

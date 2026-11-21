@@ -7,8 +7,13 @@
 // 清理器是服务级基础设施，不建 Agent、不调用 LLM、不依赖 SSE。
 
 import type { PrismaClient } from '../generated/prisma/client'
-import { scrubBodyJson } from './content'
-import { REFLECTION_INVALID_EXCERPT_PLACEHOLDER, REFLECTION_SOURCE_INVALID_REASONS } from './values'
+import { scrubBodyJson, scrubEvidenceJson } from './content'
+import {
+  REFLECTION_CLEANUP_BATCH_SIZE,
+  REFLECTION_CLEANUP_INTERVAL_MS,
+  REFLECTION_INVALID_EXCERPT_PLACEHOLDER,
+  REFLECTION_SOURCE_INVALID_REASONS,
+} from './values'
 
 export interface ReflectionCleanupOptions {
   /** 启动即扫 + 周期扫描间隔（缺省 60s；父规格：TTL/清理每分钟）。 */
@@ -17,8 +22,8 @@ export interface ReflectionCleanupOptions {
   onError?: (err: unknown) => void
 }
 
-const DEFAULT_INTERVAL_MS = 60_000
-const DEFAULT_BATCH_SIZE = 50
+const DEFAULT_INTERVAL_MS = REFLECTION_CLEANUP_INTERVAL_MS
+const DEFAULT_BATCH_SIZE = REFLECTION_CLEANUP_BATCH_SIZE
 
 interface OutboxRow {
   id: string
@@ -180,11 +185,12 @@ export class ReflectionCleanupService {
         }
         const revisions = await tx.reflectionRevision.findMany({ where: { recordId } })
         for (const revision of revisions) {
-          const cleaned = scrubBodyJson(revision.bodyJson, excerpts)
-          if (cleaned !== revision.bodyJson) {
+          const cleanedBody = scrubBodyJson(revision.bodyJson, excerpts)
+          const cleanedEvidence = scrubEvidenceJson(revision.evidenceJson, excerpts)
+          if (cleanedBody !== revision.bodyJson || cleanedEvidence !== revision.evidenceJson) {
             await tx.reflectionRevision.update({
               where: { recordId_version: { recordId, version: revision.version } },
-              data: { bodyJson: cleaned },
+              data: { bodyJson: cleanedBody, evidenceJson: cleanedEvidence },
             })
           }
         }
@@ -206,7 +212,8 @@ export class ReflectionCleanupService {
 
       await tx.reflectionCleanupOutbox.updateMany({
         where: { id: { in: rows.map((row) => row.id) }, state: 'pending' },
-        data: { state: 'done', attempts: { increment: 1 } },
+        // 完成后不再保留来源摘录副本（outbox 只在待清理期间持有原文）。
+        data: { state: 'done', excerpt: '', attempts: { increment: 1 } },
       })
     })
   }
@@ -214,7 +221,7 @@ export class ReflectionCleanupService {
   private async markDone(ids: readonly string[]): Promise<void> {
     await this.prisma.reflectionCleanupOutbox.updateMany({
       where: { id: { in: [...ids] }, state: 'pending' },
-      data: { state: 'done', attempts: { increment: 1 } },
+      data: { state: 'done', excerpt: '', attempts: { increment: 1 } },
     })
   }
 }

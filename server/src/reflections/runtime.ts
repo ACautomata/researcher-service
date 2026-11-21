@@ -11,6 +11,7 @@ export interface ReflectionsPort {
   confirmTurn: ReflectionService['confirmTurn']
   displayBodyText: ReflectionService['displayBodyText']
   draftBodyText: ReflectionService['draftBodyText']
+  recordBodyText: ReflectionService['recordBodyText']
   bindInFlightEvidence: PrismaReflectionStore['bindInFlightEvidence']
 }
 
@@ -32,6 +33,7 @@ export function createReflectionsRuntime(
     confirmTurn: (context, classifier) => service.confirmTurn(context, classifier),
     displayBodyText: (ownerId, displayId) => service.displayBodyText(ownerId, displayId),
     draftBodyText: (ownerId, draftId, version) => service.draftBodyText(ownerId, draftId, version),
+    recordBodyText: (ownerId, recordId, version) => service.recordBodyText(ownerId, recordId, version),
     bindInFlightEvidence: (p) => store.bindInFlightEvidence(p),
   }
   return { store, service, port }

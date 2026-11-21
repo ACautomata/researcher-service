@@ -22,6 +22,7 @@ describe('#1080 模型输入解引用（RF21）', () => {
   const middleware = createReflectionDereferenceMiddleware({
     displayBodyText: async (_ownerId, displayId) => (displayId === 'disp-1' ? LONG_BODY : null),
     draftBodyText: async (_ownerId, draftId, version) => (draftId === 'draft-1' && version === 3 ? '【草稿正文】' + LONG_BODY : null),
+    recordBodyText: async (_ownerId, recordId, version) => (recordId === 'record-1' && version === 2 ? '【记录正文】' + LONG_BODY : null),
   })
 
   const frame = {
@@ -73,6 +74,22 @@ describe('#1080 模型输入解引用（RF21）', () => {
     })
     expect(String(received[0])).toContain('草稿正文')
     expect(received[1]).toBe('草稿 reflection_draft:draft-1:2')
+  })
+
+  it('正式记录正文引用临时展开，失效/不存在保留引用（#1084）', async () => {
+    const ok = new HumanMessage('记录 reflection_record:record-1:2')
+    const gone = new HumanMessage('记录 reflection_record:record-9:1')
+    let received: unknown[] = []
+    await runWithReflectionContext(frame, async () => {
+      await (middleware as unknown as {
+        wrapModelCall: (req: unknown, handler: (req: unknown) => unknown) => Promise<unknown>
+      }).wrapModelCall(requestWith([ok, gone]), (req: unknown) => {
+        received = (req as { messages: HumanMessage[] }).messages.map((m) => m.content)
+        return { ok: true }
+      })
+    })
+    expect(String(received[0])).toContain('记录正文')
+    expect(received[1]).toBe('记录 reflection_record:record-9:1')
   })
 
   it('展示不可读/已删除 → 保留引用占位，不编造正文', async () => {    const original = new HumanMessage('reflection_display:gone')

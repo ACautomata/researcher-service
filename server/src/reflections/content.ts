@@ -266,6 +266,25 @@ export function scrubBodyJson(raw: string, excerpts: readonly string[]): string 
   return JSON.stringify({ ...record, ...cleaned, ...(evidence !== undefined ? { evidence } : {}) })
 }
 
+/** revision.evidenceJson（证据数组快照）中摘录副本的清理；非数组/不可解析时原样返回。 */
+export function scrubEvidenceJson(raw: string, excerpts: readonly string[]): string {
+  if (excerpts.length === 0) return raw
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!Array.isArray(value)) return raw
+  return JSON.stringify(value.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    const record = item as Record<string, unknown>
+    return typeof record.excerpt === 'string'
+      ? { ...record, excerpt: scrubSourceFragment(record.excerpt, excerpts) }
+      : record
+  }))
+}
+
 /** 读门证据视图：来源失效的摘录以占位替代，绝不把已封锁正文交回调用方。 */
 export function sanitizedDraftEvidenceViews(evidence: readonly EvidenceRecord[]): EvidenceView[] {
   return evidenceViews(evidence).map((view, index) => {
@@ -305,6 +324,18 @@ export function sanitizedRecordEvidenceViews(evidence: readonly RecordEvidenceRe
 }
 
 // 展示正文的唯一序列化实现（hash 与持久正文同源——防两处副本漂移）。
+export interface BodyTextView {
+  readonly position: number
+  readonly sessionId: string
+  readonly messageId: string | null
+  readonly region: string
+  readonly start: number | null
+  readonly end: number | null
+  readonly excerpt: string
+  readonly status: string
+  readonly reason?: string
+}
+
 export function presentationPayload(p: {
   body: DraftBody
   evidence: readonly EvidenceRecord[]
