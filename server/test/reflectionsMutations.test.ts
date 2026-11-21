@@ -51,6 +51,7 @@ describe('#1083 完整确认路径的正式记录变更', () => {
     const sqlite = new Database(dbPath)
     sqlite.exec(INIT_SQL)
     sqlite.exec(readFileSync(path.join(process.cwd(), 'prisma', 'reflection-triggers.sql'), 'utf8'))
+    sqlite.exec(readFileSync(path.join(process.cwd(), 'prisma', 'reflection-owner-trigger.sql'), 'utf8'))
     sqlite.close()
     process.env.DATABASE_URL = `file:${dbPath}`
     process.env.NODE_ENV = 'test'
@@ -424,6 +425,10 @@ describe('#1083 完整确认路径的正式记录变更', () => {
     expect((await later.service.execute(leader(), input)).outcome).toBe('success')
     expect((await later.service.execute(leader(), input)).error?.code).toBe('limit')
     later.dispose()
+    await prisma.session.delete({ where: { id: sessionId } })
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'after-quota-delete', title: '删除会话后额度' } })).id
+    const freshSource = await seedAssistant('新会话证据')
+    expect((await runtime.service.execute(leader(), { ...DRAFT, evidence: [{ message_id: freshSource.id, region: 'content', excerpt: '新会话证据' }] })).error?.code).toBe('limit')
   })
 
   it('RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文', async () => {
@@ -514,6 +519,18 @@ describe('#1083 完整确认路径的正式记录变更', () => {
     const result = await runtime.service.execute(context, { operation: 'commit', ...stale })
     expect(result.error?.code).toBe('conflict')
     expect(result.differences).toMatchObject([{ expected_generation: 1, actual_generation: 3 }])
+  })
+
+  it('RF14 来源失效后硬删同步清专属 outbox；共享来源的独立记录清理仍可重放', async () => {
+    const first = await save()
+    const source = await prisma.reflectionRecordEvidence.findFirstOrThrow({ where: { recordId: first.record_id } })
+    await prisma.sessionMessage.update({ where: { id: source.messageId! }, data: { content: '来源已变更' } })
+    expect(await prisma.reflectionCleanupOutbox.count({ where: { ownerId, messageId: source.messageId, state: 'pending' } })).toBeGreaterThan(0)
+    const result = await runtime.service.execute(leader(), { operation: 'draft', action: 'delete', targets: [{ record_id: first.record_id, version: 1 }] })
+    const raw = result.draft as { draft_id: string; version: number }
+    const draft = { draft_id: raw.draft_id, version: raw.version }
+    expect((await runtime.service.execute(await authorize(draft), { operation: 'commit', ...draft })).outcome).toBe('success')
+    expect(await prisma.reflectionCleanupOutbox.count({ where: { ownerId, messageId: source.messageId } })).toBe(0)
   })
 
 })

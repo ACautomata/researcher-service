@@ -247,7 +247,10 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       if ((await this.targetDifferences(tx, p.ownerId, p.targets ?? [])).length) throw new Error('stale reflection targets')
       const now = new Date(this.options.clock?.() ?? Date.now())
       const active = await tx.reflectionDraft.count({ where: { ownerId: p.ownerId, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } } })
-      const recent = await tx.reflectionDraft.count({ where: { ownerId: p.ownerId, createdAt: { gt: new Date(now.getTime() - 86400000) } } })
+      const since = new Date(now.getTime() - 86400000)
+      // 创建事件不随会话删除，关闭/删会话不能重新发放24小时额度。兼容旧草稿无事件的情况。
+      const creations = await tx.reflectionEvent.findMany({ where: { ownerId: p.ownerId, action: 'draft_created', createdAt: { gt: since } }, select: { objectId: true } })
+      const recent = creations.length + await tx.reflectionDraft.count({ where: { ownerId: p.ownerId, createdAt: { gt: since }, id: { notIn: creations.map(e => e.objectId) } } })
       if (active >= 100 || recent >= 100) throw new ReflectionDraftLimitError()
       const draft = await tx.reflectionDraft.create({
         data: {
@@ -263,6 +266,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           contentJson: JSON.stringify(p.body),
         },
       })
+      await tx.reflectionEvent.create({ data: { ownerId: p.ownerId, objectId: draft.id, action: 'draft_created', result: 'ok', createdAt: now } })
       await insertEvidenceRows(tx, p.ownerId, draft.id, draft.version, p.evidence)
       if (p.episode) await tx.reflectionEpisode.create({ data: {
         id: p.episode.id, ownerId: p.ownerId, sessionId: p.sessionId, requestId: p.episode.requestId, draftId: draft.id,
@@ -1008,10 +1012,6 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       if (draft.status === 'committed' || draft.status === 'cancelled' || draft.status === 'rejected') return
       if (p.decision === 'reject' || p.decision === 'withdraw') {
         await purgeDraftCopies(tx, p.ownerId, [draft.id], p.now, p.decision === 'reject' ? 'rejected' : 'cancelled')
-        await tx.reflectionDraft.update({
-          where: { id: draft.id },
-          data: { status: p.decision === 'reject' ? 'rejected' : 'cancelled', closedAt: p.now, contentJson: '{}', title: '' },
-        })
       } else {
         // revise：保留正文供 Leader 修订/重新展示，但必须重新展示确认。
         await tx.reflectionDraft.update({ where: { id: draft.id }, data: { status: 'pending' } })
