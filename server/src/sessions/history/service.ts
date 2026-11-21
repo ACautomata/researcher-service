@@ -216,13 +216,13 @@ export class SessionHistoryService {
     return result
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer)
       this.sweepTimer = undefined
     }
     this.cursors.clear()
-    this.reader.dispose?.()
+    await this.reader.dispose?.()
   }
 
   private async reserve(context: HistoryContext, signal?: AbortSignal): Promise<{ remainingBytes: number; remainingWaitMs: number; reserved: boolean } | { result: HistoryResult }> {

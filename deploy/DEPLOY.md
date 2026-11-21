@@ -48,6 +48,10 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
    健康门 `curl 127.0.0.1:18080/api/health`（30s 内非 200 即 workflow 红）。
+   若宿主到 GHCR 的 blob 链路失败（2026-11-21 事故：大层多次在接近 100% 时 `unexpected EOF`，
+   Docker 层下载无断点续传），自动降级为 **runner 直传**：本 run 推送后 runner 从 GHCR 拉
+   server 镜像（GitHub 内网路径），`docker save` 经 SSH 喂给宿主 `docker load`；之后再补一次
+   compose pull 拉取 frontend / searxng 的小层。部署不再依赖宿主到 GHCR 的 blob 链路。
 5. 防御性 bootstrap：`/www/panel` 缺则自动创建（幂等）。
 
 ## 一次性 bootstrap（手工，仅首次）

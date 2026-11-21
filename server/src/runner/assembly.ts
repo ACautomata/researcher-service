@@ -256,7 +256,7 @@ export async function assembleRunner(opts: {
     plugins,
     close: async () => {
       background.close()
-      service.dispose()
+      await service.dispose()
       await queue.close()
     },
   }

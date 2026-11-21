@@ -33,8 +33,8 @@ export class HistoryRuntime {
     return this.ledger.resolveRunRequest(input)
   }
 
-  dispose(): void {
-    this.service.dispose()
+  async dispose(): Promise<void> {
+    await this.service.dispose()
   }
 }
 

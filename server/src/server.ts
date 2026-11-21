@@ -191,10 +191,11 @@ async function main(): Promise<void> {
   // 优雅关闭：runner 队列 drain（在飞 run 完成或 job failed——run 执行错误已在 RunService
   // 消化为终态事件）；沙箱/wiki 容器生命周期无后台队列（#858 起 fleet BullMQ 队列退役）。
   const shutdown = async (): Promise<void> => {
+    await reflections.dispose()
     await reflectionsCleanup.stop().catch(() => {})
+    await runner.close().catch(() => {})
     await sandboxes.close().catch(() => {})
     await wikiContainers.close().catch(() => {})
-    await runner.close().catch(() => {})
     server.close(() => process.exit(0))
   }
   process.on('SIGINT', () => void shutdown())

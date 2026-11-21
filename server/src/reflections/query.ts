@@ -98,8 +98,8 @@ export class ProcessReflectionQuery implements ReflectionQueryPort {
     })
   }
 
-  dispose(): void {
-    this.pool.dispose()
+  async dispose(): Promise<void> {
+    await this.pool.dispose()
   }
 
   private run<T>(

@@ -81,7 +81,7 @@ export interface HistoryReader {
    * 不占槽。返回 undefined = 每用户/全平台槽已满，立即 busy，不排队。
    */
   executionLease?(context: HistoryContext, options?: { signal?: AbortSignal; waitBudgetMs?: number }): Promise<HistoryExecutionLease | undefined> | HistoryExecutionLease | undefined
-  dispose?(): void
+  dispose?(): void | Promise<void>
 }
 
 export interface HistoryExecutionLease {
@@ -168,7 +168,7 @@ export interface HistoryRuntimePort {
   resolveRunRequest?(input: HistoryRequestLedgerInput): Promise<string | undefined>
   /** true = 解析不到稳定身份即关闭历史增强（不重新发放额度）。 */
   readonly requiresRequestIdentity?: boolean
-  dispose?(): void
+  dispose?(): void | Promise<void>
 }
 
 export interface HistoryAccessEvent {

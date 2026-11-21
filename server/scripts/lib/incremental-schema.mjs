@@ -19,9 +19,26 @@
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
 // 21→22 #1082 RF-T06 记录检索额度账本 + #1084 RF-T08 证据失效两表（均 additive）。
-export const SCHEMA_VERSION = 23
+export const SCHEMA_VERSION = 24
 
 export function runIncrementalSchema(db) {
+  db.exec(`-- 无内容安全日志；独立于90天访问事件保留期，备份链存续期间不清理。
+CREATE TABLE IF NOT EXISTS reflection_recovery_state (
+ id TEXT PRIMARY KEY, lineage TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO reflection_recovery_state(id,lineage,locked) VALUES ('singleton',lower(hex(randomblob(16))),0);
+CREATE TABLE IF NOT EXISTS reflection_safety_journal (
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, ownerId TEXT NOT NULL, kind TEXT NOT NULL,
+ objectId TEXT NOT NULL, state TEXT NOT NULL
+);
+`)
+  db.exec(`CREATE TABLE IF NOT EXISTS "reflection_confirmation_attempts" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT NOT NULL
+  );`)
+
   db.exec(`
 CREATE TABLE IF NOT EXISTS "reflection_episodes" (
     "id" TEXT NOT NULL PRIMARY KEY,
@@ -937,6 +954,7 @@ CREATE TABLE IF NOT EXISTS "reflection_idempotency" (
 );
 
 CREATE TABLE IF NOT EXISTS "reflection_request_budgets" (
+    "originRunId" TEXT NOT NULL DEFAULT '',
     "requestId" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "sessionId" TEXT NOT NULL,
@@ -956,6 +974,8 @@ CREATE INDEX IF NOT EXISTS "reflection_grants_ownerId_draftId_status_idx" ON "re
 CREATE INDEX IF NOT EXISTS "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
 CREATE INDEX IF NOT EXISTS "reflection_request_budgets_ownerId_sessionId_idx" ON "reflection_request_budgets"("ownerId", "sessionId");
 `)
+  if (!db.prepare('PRAGMA table_info("reflection_request_budgets")').all().some(c => c.name === 'originRunId')) db.exec(`ALTER TABLE "reflection_request_budgets" ADD COLUMN "originRunId" TEXT NOT NULL DEFAULT ''`)
+
 
   // 20→21：v20 库的 reflection_presentations 已存在（旧 CREATE 无 ackTurn）——补列。
   const draftColumns = db.prepare('PRAGMA table_info("reflection_drafts")').all()

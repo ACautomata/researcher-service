@@ -61,6 +61,8 @@ export class LeasedProcessPool {
   private readonly maxPerUser: number
   private readonly slots: Slot[] = []
   private readonly leasesPerUser = new Map<string, number>()
+  private readonly children = new Set<ChildProcess>()
+  private closing?: Promise<void>
   private seq = 0
   private disposed = false
 
@@ -76,7 +78,7 @@ export class LeasedProcessPool {
     let released = false
     return {
       run: <T>(payload: ProcessTaskPayload, options: ProcessTaskOptions) =>
-        this.task<T>(slot, payload, options),
+        released ? Promise.reject(this.options.errors.unavailable()) : this.task<T>(slot, payload, options),
       release: () => {
         if (released) return
         released = true
@@ -107,11 +109,17 @@ export class LeasedProcessPool {
     }
   }
 
-  dispose(): void {
+  dispose(): Promise<void> {
+    if (this.closing) return this.closing
     this.disposed = true
+    const exits = [...this.children].map(child => new Promise<void>(resolve => {
+      child.once('exit', () => resolve())
+    }))
     for (const slot of this.slots) this.killSlot(slot)
     this.slots.length = 0
     this.leasesPerUser.clear()
+    this.closing = Promise.all(exits).then(() => {})
+    return this.closing
   }
 
   private acquire(ownerId: string): Slot | undefined {
@@ -177,7 +185,7 @@ export class LeasedProcessPool {
         else finish(() => reject(this.childError(message)))
       }
       const onExit = (): void => {
-        slot.child = undefined
+        if (slot.child === child) slot.child = undefined
         finish(() => reject(this.options.errors.unavailable()))
       }
       const onAbort = (): void => {
@@ -222,7 +230,9 @@ export class LeasedProcessPool {
         env: { ...process.env, RES_READONLY_MODULE_BASE: this.options.corePath, RES_READONLY_CORE: this.options.corePath },
       })
       child.unref()
+      this.children.add(child)
       child.on('exit', () => {
+        this.children.delete(child)
         if (slot.child === child) slot.child = undefined
       })
       slot.child = child

@@ -14,6 +14,22 @@ import type {
 export class PrismaReflectionBudgetLedger implements ReflectionBudgetStore {
   constructor(private readonly prisma: PrismaClient) {}
 
+  async resolveRunRequest(input: { kind: string; runId: string; ownerId: string; sessionId: string; triggerMessageId?: string; resumeOfRunId?: string }): Promise<string | undefined> {
+    if (input.kind === 'message') {
+      if (!input.triggerMessageId) return undefined
+      const trigger = await this.prisma.sessionMessage.findFirst({ where: { id: input.triggerMessageId, sessionId: input.sessionId, role: 'user', archivedAt: null, session: { ownerId: input.ownerId } } })
+      if (!trigger) return undefined
+      const row = await this.prisma.reflectionRequestBudget.upsert({ where: { requestId: trigger.id }, create: { requestId: trigger.id, ownerId: input.ownerId, sessionId: input.sessionId, lastRunId: input.runId, originRunId: input.runId }, update: {} })
+      if (row.ownerId !== input.ownerId || row.sessionId !== input.sessionId) return undefined
+      await this.prisma.reflectionRequestBudget.update({ where: { requestId: row.requestId }, data: { lastRunId: input.runId } })
+      return row.requestId
+    }
+    const row = await this.prisma.reflectionRequestBudget.findFirst({ where: { ownerId: input.ownerId, sessionId: input.sessionId, OR: [{ lastRunId: input.runId }, ...(input.resumeOfRunId ? [{ originRunId: input.resumeOfRunId }, { lastRunId: input.resumeOfRunId }] : [])] } })
+    if (!row) return undefined
+    await this.prisma.reflectionRequestBudget.update({ where: { requestId: row.requestId }, data: { lastRunId: input.runId } })
+    return row.requestId
+  }
+
   async reserve(
     request: ReflectionBudgetRequest,
     limits: ReflectionBudgetLimits,

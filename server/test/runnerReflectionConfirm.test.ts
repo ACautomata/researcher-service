@@ -208,7 +208,7 @@ describe('#1081 反思确认授权：真实图无自批通道', () => {
     expect(toolText).not.toContain('record_id')
   })
 
-  it('审批恢复（resume 无 triggerMessageId）：从会话最新用户消息恢复确认身份，commit 仍可保存', async () => {
+  it('审批恢复（resume 无 triggerMessageId）：从持久请求身份恢复且不受新消息影响，commit 仍可保存', async () => {
     const display = await seedAckedPresentation()
     const triggerId = await seedOwningMessage('就按这版保存')
     const models: ScriptedChatModel[] = []
@@ -223,6 +223,8 @@ describe('#1081 反思确认授权：真实图无自批通道', () => {
     expect(svc.stateOf(sessionId)?.state).toBe('interrupted')
     expect(await prisma.reflectionRecord.count({ where: { ownerId: owner.id } })).toBe(0)
 
+    // 即使持久历史出现更新消息，也不能把旧审批请求改绑到该消息。
+    await seedOwningMessage('较新的无关消息，不能确认旧版本')
     const resume = svc.buildResumeCommand({
       sessionId,
       ownerId: owner.id,
@@ -230,7 +232,15 @@ describe('#1081 反思确认授权：真实图无自批通道', () => {
       decisions: { decisions: [{ type: 'approve' }] },
     })
     expect(resume.triggerMessageId).toBeUndefined()
-    await svc.execute(resume)
-    expect(await prisma.reflectionRecord.count({ where: { ownerId: owner.id } })).toBe(1)
+    // RF19：丢弃图缓存/服务实例后，审批恢复只消费原授权，不重新批准。
+    const recovered = createReflectionsRuntime(prisma, { classifier: async () => { throw new Error('恢复不能分类') } })
+    const restarted = makeService([
+      toolCallAi('call-commit-after-restart', 'reflection_records', { operation: 'commit', draft_id: display.draftId, version: display.version }),
+      new AIMessage('恢复后已保存。'),
+    ], [], recovered.port, () => ({ tools: ['execute'] }))
+    try {
+      await restarted.execute(resume)
+      expect(await prisma.reflectionRecord.count({ where: { ownerId: owner.id } })).toBe(1)
+    } finally { await restarted.dispose(); await recovered.dispose() }
   }, 30_000)
 })

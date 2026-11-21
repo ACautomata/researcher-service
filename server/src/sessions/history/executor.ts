@@ -121,8 +121,8 @@ export class ProcessHistoryReader implements HistoryReader {
     })
   }
 
-  dispose(): void {
-    this.pool.dispose()
+  async dispose(): Promise<void> {
+    await this.pool.dispose()
   }
 
   private async withLease<T>(context: HistoryContext, run: (lease: HistoryExecutionLease) => Promise<T>): Promise<T> {

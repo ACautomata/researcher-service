@@ -1042,6 +1042,7 @@ model ReflectionIdempotency {
 // #1082（RF-T06）记录检索主请求额度账本：与历史检索独立（次数/等待/字节各一套），
 // requestId = 可信 triggerMessageId；resume/recover 延续同一行，不重新发放。
 model ReflectionRequestBudget {
+  originRunId String @default("")
   requestId     String   @id
   ownerId       String
   sessionId     String
@@ -1081,4 +1082,28 @@ model ReflectionEpisode {
 
   @@index([ownerId, requestId])
   @@map("reflection_episodes")
+}
+
+model ReflectionConfirmationAttempt {
+  id String @id
+  ownerId String
+  sessionId String
+  messageId String
+  @@map("reflection_confirmation_attempts")
+}
+
+// #1087：安全日志随备份链保留，不能按访问日志TTL删除。
+model ReflectionRecoveryState {
+  id String @id
+  lineage String
+  locked Int @default(0)
+  @@map("reflection_recovery_state")
+}
+model ReflectionSafetyJournal {
+  seq Int @id @default(autoincrement())
+  ownerId String
+  kind String
+  objectId String
+  state String
+  @@map("reflection_safety_journal")
 }

@@ -116,6 +116,28 @@ describe('CD 工作流（issue #593，ADR 0013；#858 后无模板注入）', ()
     expect(frontendStep).toMatch(/build-contexts:/)
     expect(frontendStep).toMatch(/plugins=/)
   })
+
+  // 2026-11-21 部署事故：宿主→GHCR 大 blob（package.json 改动后重建的 332.9MB npm ci 层）
+  // 连续多次在接近 100% 时 unexpected EOF；Docker 层下载无断点续传，重试即整层重来，30m
+  // command_timeout 内永远拉不完。fallback 契约 = runner 直传：runner 从 GHCR 拉镜像 → docker
+  // save 经 SSH 喂给宿主 docker load。拉取步骤保留（小层仍走正常 pull），失败不红、由 fallback
+  // 接住；部署步骤不再自行 pull（避免回退到宿主拉大层）。
+  it('server 镜像经 SSH 直传宿主（拉取失败 fallback，2026-11-21 事故）', () => {
+    const pullStep = cd.split('Pull images on host')[1]?.split('Preload server image over SSH')[0]
+    expect(pullStep, 'cd.yml 缺宿主拉镜像步骤').toBeDefined()
+    expect(pullStep).toMatch(/continue-on-error: true/)
+
+    const preload = cd.split('Preload server image over SSH')[1]?.split('Retry pull after preload')[0]
+    expect(preload, 'cd.yml 缺 server 镜像直传 fallback 步骤').toBeDefined()
+    expect(preload).toMatch(/steps\.pull\.outcome == 'failure'/)
+    expect(preload).toMatch(/docker pull "\$SERVER_IMAGE:\$IMAGE_TAG"/)
+    expect(preload).toMatch(/docker save "\$SERVER_IMAGE:latest"/)
+    expect(preload).toMatch(/'docker load'/)
+
+    const deployStep = cd.split('Deploy over SSH (up')[1]
+    expect(deployStep, 'cd.yml 缺部署步骤').toBeDefined()
+    expect(deployStep).not.toMatch(/compose .*pull/)
+  })
 })
 
 describe('frontend 镜像构建布局（#788 插件源直引入：容器内复刻 repo 根）', () => {

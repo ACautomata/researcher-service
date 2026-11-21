@@ -5,6 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
@@ -38,6 +39,7 @@ function classifierReturning(decision: ConfirmationDecision, reason?: string) {
 
 describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
   let dir: string
+  let dbPath: string
   let prisma: PrismaClient
   let runtime: ReflectionsRuntime
   let ownerId: string
@@ -46,7 +48,7 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(path.join(tmpdir(), `panel-1081-${process.pid}-`))
-    const dbPath = path.join(dir, 'test.db')
+    dbPath = path.join(dir, 'test.db')
     const sqlite = new Database(dbPath)
     sqlite.exec(INIT_SQL)
     sqlite.close()
@@ -254,6 +256,42 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
     expect(retry.outcome).toBe('success')
     expect((retry.record as { record_id: string }).record_id).toBe((first.record as { record_id: string }).record_id)
     expect(await prisma.reflectionRecord.count({ where: { ownerId } })).toBe(1)
+  })
+
+  it('RF08 commit成功结果未知，真实新进程重试只返回原记录', async () => {
+    const display = await seedPresentation()
+    const message = await seedUserMessage('确认保存')
+    await runtime.service.confirmTurn(leader(message.id), classifierReturning('confirm'))
+    const request = { operation: 'commit', draft_id: display.draftId, version: display.version }
+    const committed = await runtime.service.execute(leader(message.id), request)
+    expect(committed.outcome).toBe('success')
+    const output = execFileSync(process.execPath, ['--import', 'tsx', 'test/fixtures/reflection-recover.mts', `file:${dbPath}`, JSON.stringify(leader(message.id)), JSON.stringify(request)], { encoding: 'utf8' })
+    const recovered = JSON.parse(output.trim())
+    expect(recovered.outcome).toBe('success')
+    expect(recovered.record).toEqual(committed.record)
+    expect(await prisma.reflectionRecord.count({ where: { ownerId } })).toBe(1)
+  })
+
+  it('#1087 分类失败后重启不重新批准，原消息停止增强', async () => {
+    await seedPresentation()
+    const message = await seedUserMessage('确认保存')
+    expect((await runtime.service.confirmTurn(leader(message.id), async () => { throw new Error('故障') })).status).toBe('classifier_unavailable')
+    const restarted = createReflectionsRuntime(prisma)
+    try {
+      expect((await restarted.service.confirmTurn(leader(message.id), classifierReturning('confirm'))).status).toBe('skipped')
+      expect(await prisma.reflectionGrant.count({ where: { confirmationMessageId: message.id } })).toBe(0)
+    } finally { await restarted.dispose() }
+  })
+
+  it('#1087 重启重放确认不重新分类', async () => {
+    await seedPresentation()
+    const message = await seedUserMessage('确认保存')
+    const first = await runtime.service.confirmTurn(leader(message.id), classifierReturning('confirm'))
+    expect(first.status).toBe('granted')
+    const restarted = createReflectionsRuntime(prisma)
+    try {
+      expect(await restarted.service.confirmTurn(leader(message.id), async () => { throw new Error('不得重新分类') })).toEqual(first)
+    } finally { restarted.dispose() }
   })
 
   it.each([

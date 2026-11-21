@@ -4,7 +4,7 @@ import { PrismaClient } from './generated/prisma/client'
 // PrismaClient 工厂：Prisma 7 经 driver adapter 注入连接串。
 // 测试用 createPrismaClient(testUrl) 注入临时 DB；生产用单例 prisma。
 export function createPrismaClient(url: string): PrismaClient {
-  return new PrismaClient({ adapter: new PrismaBetterSqlite3({ url }) })
+  return new PrismaClient({ adapter: new PrismaBetterSqlite3({ url, timeout: 250 }) })
 }
 
 let singleton: PrismaClient | null = null

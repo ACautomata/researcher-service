@@ -360,7 +360,7 @@ export interface ReflectionQueryPort {
   lease(ownerId: string): ReflectionQueryLease | undefined
   probeBusy(durationMs: number, options?: { cooperativeMs?: number; hardMs?: number; signal?: AbortSignal }): Promise<void>
   probeReadOnly(): Promise<boolean>
-  dispose(): void
+  dispose(): void | Promise<void>
 }
 
 // 主请求额度（I6）：新记录工具独立 20 次 / 累计等待 10 秒 / 累计返回 256KiB。
@@ -407,6 +407,10 @@ export interface ReflectionEvidencePort {
 }
 
 export interface ReflectionStore {
+  recoveryReady(): Promise<boolean>
+  claimConfirmation(context: ReflectionContext): Promise<boolean>
+  recoverConfirmation(context: ReflectionContext, now: Date): Promise<ConfirmationTurnOutcome>
+
   analysisCompleted(context: ReflectionContext): Promise<boolean>
   completeAnalysis(context: ReflectionContext): Promise<void>
   createDraft(p: {
