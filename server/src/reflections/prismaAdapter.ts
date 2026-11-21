@@ -5,15 +5,20 @@
 
 import type { PrismaClient } from '../generated/prisma/client'
 import { parseSavedProduct } from '../sessions/productMessage'
-import { contentVersionOf, matchExcerpt } from './content'
+import { contentVersionOf, matchExcerpt, presentationJson, sha256 } from './content'
 import type {
+  CommitOutcome,
+  CommitResult,
+  ConfirmationCandidate,
   DraftBody,
   DraftRecord,
   EvidenceRecord,
   EvidenceSource,
+  GrantRecord,
   ReflectionContext,
   ReflectionEvidencePort,
   ReflectionStore,
+  ReflectionTriggerMessage,
 } from './model'
 import type { ReflectionDraftStatus, ReflectionPresentationStatus, ReflectionRegion } from './values'
 
@@ -111,13 +116,19 @@ function draftOf(row: DraftRowLike, evidence: readonly EvidenceRowLike[]): Draft
 }
 
 export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidencePort {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly options: {
+      /** 故障注入（RF18）：事件写失败必须整笔回滚，不得留下半套正式结果。 */
+      failEventWrite?: (action: string) => boolean
+    } = {},
+  ) {}
 
   // ---- 可信当前证据端口 ----
 
   async read(context: ReflectionContext, sessionId: string, messageId: string): Promise<EvidenceSource | null> {
-    // 可信当前证据端口只读本人当前主线程（父规格 I4）：不因模型传了别的 session_id 放宽读取。
-    if (sessionId !== context.currentSessionId) return null
+    // 已持久证据只读本人主线程会话；草稿阶段「只能引用当前会话」的边界在 service.resolveEvidence，
+    // 此处放宽到本人任意未归档会话是为了跨会话重新展示时复核旧证据（不扩大跨用户/子助手权限）。
     const session = await this.prisma.session.findFirst({
       where: { id: sessionId, ownerId: context.ownerId, archivedAt: null, isTeammate: false },
       select: { id: true },
@@ -233,7 +244,11 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         },
       })
       await insertEvidenceRows(tx, p.ownerId, current.id, version, p.evidence)
-      // 实质修改：撤销旧展示（父规格 I3）。
+      // 实质修改：撤销旧展示与未消费授权（父规格 I3）。
+      await tx.reflectionGrant.updateMany({
+        where: { ownerId: p.ownerId, draftId: current.id, status: 'active' },
+        data: { status: 'revoked' },
+      })
       await tx.reflectionPresentation.updateMany({
         where: { ownerId: p.ownerId, draftId: current.id, status: 'active' },
         data: { status: 'revoked', revokedAt: new Date() },
@@ -249,6 +264,10 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       const current = await tx.reflectionDraft.findFirst({ where: { id: draftId, ownerId } })
       if (!current || current.status === 'cancelled' || current.status === 'committed') return null
       await tx.reflectionEvidence.deleteMany({ where: { draftId: current.id } })
+      await tx.reflectionGrant.updateMany({
+        where: { ownerId, draftId: current.id, status: 'active' },
+        data: { status: 'revoked' },
+      })
       await tx.reflectionPresentation.updateMany({
         where: { ownerId, draftId: current.id },
         data: { status: 'deleted', revokedAt: new Date(), bodyJson: '{}' },
@@ -278,7 +297,8 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
 
   async revokePresentations(ownerId: string, draftId: string): Promise<void> {
     await this.prisma.reflectionPresentation.updateMany({
-      where: { ownerId, draftId, status: 'active' },
+      // 已 acked 的旧展示同样失效：重新展示后须重新 ack，避免同版本多候选。
+      where: { ownerId, draftId, status: { in: ['active', 'acked'] } },
       data: { status: 'revoked', revokedAt: new Date() },
     })
   }
@@ -337,15 +357,6 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
 
   async getPresentation(ownerId: string, displayId: string): Promise<import('./model').PresentationRecord | null> {
     const row = await this.prisma.reflectionPresentation.findFirst({ where: { displayId, ownerId } })
-    if (!row) return null
-    return this.presentationRecord(row)
-  }
-
-  async latestPresentation(ownerId: string, draftId: string): Promise<import('./model').PresentationRecord | null> {
-    const row = await this.prisma.reflectionPresentation.findFirst({
-      where: { ownerId, draftId, status: { in: ['active', 'acked'] } },
-      orderBy: [{ createdAt: 'desc' }, { displayId: 'desc' }],
-    })
     if (!row) return null
     return this.presentationRecord(row)
   }
@@ -510,12 +521,15 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         return item !== null && typeof item === 'object' && item.displayId === row.displayId && item.version === row.draftVersion
       })
       if (!bound) return { error: 'conflict' as const }
+      // 服务端单调序号：ack 时刻会话最大 turn。之后的用户消息 turn 必更大；
+      // 若确认消息早于 ack 入列，其 turn ≤ ackTurn，不能事后补 ack 追认。
+      const maxTurn = await tx.sessionMessage.aggregate({ where: { sessionId: row.sessionId }, _max: { turn: true } })
       const event = await tx.reflectionEvent.create({
         data: { ownerId: p.ownerId, objectId: row.displayId, action: 'display_ack', version: row.draftVersion, result: 'ok' },
       })
       const updated = await tx.reflectionPresentation.update({
         where: { displayId: row.displayId },
-        data: { status: 'acked', ackSeq: event.seq, ackedAt: new Date() },
+        data: { status: 'acked', ackSeq: event.seq, ackTurn: maxTurn._max.turn ?? null, ackedAt: new Date() },
       })
       return { seq: event.seq, ackedAt: updated.ackedAt!.toISOString() }
     })
@@ -526,6 +540,388 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       where: { draftId, draftVersion: version },
       orderBy: { position: 'asc' },
     })
+  }
+
+  // ---- 确认授权（#1081 · RF-T05）----
+
+  async getTriggerMessage(ownerId: string, sessionId: string, messageId: string): Promise<ReflectionTriggerMessage | null> {
+    const row = await this.prisma.sessionMessage.findFirst({
+      where: {
+        id: messageId,
+        sessionId,
+        role: 'user',
+        archivedAt: null,
+        session: { ownerId, archivedAt: null, isTeammate: false },
+      },
+      select: { id: true, turn: true, content: true },
+    })
+    return row ?? null
+  }
+
+  async confirmationCandidates(ownerId: string, sessionId: string, beforeTurn: number): Promise<ConfirmationCandidate[]> {
+    const rows = await this.prisma.reflectionPresentation.findMany({
+      where: { ownerId, sessionId, status: 'acked', messageId: { not: null } },
+      orderBy: [{ createdAt: 'desc' }, { displayId: 'asc' }],
+    })
+    const out: ConfirmationCandidate[] = []
+    for (const row of rows) {
+      if (row.messageId === null || row.ackSeq === null || row.ackTurn === null) continue
+      // 确认消息必须晚于该版本有效 ack（ackTurn = ack 时刻会话最大 turn）。
+      if (row.ackTurn >= beforeTurn) continue
+      // 确认消息必须晚于展示绑定的终态 assistant 行（服务端单调 turn，不猜同毫秒时间戳）。
+      const bound = await this.prisma.sessionMessage.findFirst({
+        where: { id: row.messageId, sessionId, role: 'assistant', archivedAt: null, turn: { lt: beforeTurn } },
+        select: { turn: true },
+      })
+      if (!bound) continue
+      const draftRow = await this.prisma.reflectionDraft.findFirst({
+        where: { id: row.draftId, ownerId, version: row.draftVersion, status: { in: ['pending', 'confirmed_pending_save'] } },
+      })
+      if (!draftRow) continue
+      const evidence = await this.evidenceRows(row.draftId, row.draftVersion)
+      if (evidence.length === 0 || !evidence.every((e) => e.status === 'valid')) continue
+      out.push({
+        presentation: await this.presentationRecord(row),
+        draft: draftOf(draftRow, evidence),
+      })
+    }
+    return out
+  }
+
+  async recentUserMessages(ownerId: string, sessionId: string, beforeTurn: number, limit: number): Promise<string[]> {
+    const rows = await this.prisma.sessionMessage.findMany({
+      where: { sessionId, role: 'user', archivedAt: null, turn: { lt: beforeTurn }, session: { ownerId } },
+      orderBy: { turn: 'desc' },
+      take: limit,
+      select: { content: true },
+    })
+    return rows.map((r) => r.content).reverse()
+  }
+
+  async issueGrant(p: {
+    ownerId: string
+    sessionId: string
+    confirmationMessageId: string
+    confirmationTurn: number
+    candidate: ConfirmationCandidate
+    expiresAt: Date
+  }): Promise<GrantRecord | null> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        // 同一确认消息重复识别（恢复/重试）返回既有授权；已撤回/过窗的旧消息不再重签。
+        const existing = await tx.reflectionGrant.findFirst({
+          where: { ownerId: p.ownerId, confirmationMessageId: p.confirmationMessageId },
+        })
+        if (existing) {
+          return existing.status === 'active' || existing.status === 'consumed' ? grantOf(existing) : null
+        }
+        // 一条消息一个完整动作：草稿已有其它未消费授权时不重复签发。
+        const activeGrant = await tx.reflectionGrant.findFirst({
+          where: { ownerId: p.ownerId, draftId: p.candidate.draft.id, status: 'active' },
+        })
+        if (activeGrant) return null
+        const presentation = await tx.reflectionPresentation.findFirst({
+          where: { displayId: p.candidate.presentation.displayId, ownerId: p.ownerId, sessionId: p.sessionId, status: 'acked' },
+        })
+        if (
+          !presentation ||
+          presentation.messageId === null ||
+          presentation.ackSeq === null ||
+          presentation.ackTurn === null ||
+          presentation.ackTurn >= p.confirmationTurn ||
+          presentation.draftVersion !== p.candidate.draft.version ||
+          presentation.bodyHash !== p.candidate.presentation.bodyHash
+        ) return null
+        const draft = await tx.reflectionDraft.findFirst({
+          where: { id: p.candidate.draft.id, ownerId: p.ownerId, version: p.candidate.draft.version, status: 'pending' },
+        })
+        if (!draft) return null
+        const evidence = await tx.reflectionEvidence.findMany({
+          where: { draftId: draft.id, draftVersion: draft.version },
+          select: { status: true },
+        })
+        if (evidence.length === 0 || !evidence.every((e) => e.status === 'valid')) return null
+        // CAS：草稿仍 pending 才进入待保存；并发修订/取消整体失败，无部分授权。
+        const moved = await tx.reflectionDraft.updateMany({
+          where: { id: draft.id, ownerId: p.ownerId, version: draft.version, status: 'pending' },
+          data: { status: 'confirmed_pending_save' },
+        })
+        if (moved.count !== 1) return null
+        await tx.reflectionEvent.create({
+          data: { ownerId: p.ownerId, objectId: draft.id, action: 'grant_issued', version: draft.version, result: 'ok' },
+        })
+        const grant = await tx.reflectionGrant.create({
+          data: {
+            ownerId: p.ownerId,
+            sessionId: p.sessionId,
+            confirmationMessageId: p.confirmationMessageId,
+            displayId: presentation.displayId,
+            draftId: draft.id,
+            draftVersion: draft.version,
+            bodyHash: presentation.bodyHash,
+            action: presentation.action,
+            ackSeq: presentation.ackSeq,
+            expiresAt: p.expiresAt,
+          },
+        })
+        return grantOf(grant)
+      })
+    } catch (err) {
+      // 同一确认消息并发签发：唯一约束败方读回既有 grant（幂等）。
+      if ((err as { code?: string }).code === 'P2002') {
+        const existing = await this.prisma.reflectionGrant.findFirst({
+          where: { ownerId: p.ownerId, confirmationMessageId: p.confirmationMessageId },
+        })
+        return existing ? grantOf(existing) : null
+      }
+      throw err
+    }
+  }
+
+  async commitGrant(p: {
+    ownerId: string
+    confirmationMessageId: string
+    draftId: string
+    draftVersion: number
+    now: Date
+  }): Promise<CommitOutcome> {
+    const key = idempotencyKey(p.ownerId, p.confirmationMessageId)
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const existing = await tx.reflectionIdempotency.findUnique({ where: { key } })
+        if (existing) return { result: parseCommitResult(existing.resultJson), idempotent: true }
+        const grant = await tx.reflectionGrant.findFirst({
+          where: {
+            ownerId: p.ownerId,
+            confirmationMessageId: p.confirmationMessageId,
+            draftId: p.draftId,
+            draftVersion: p.draftVersion,
+          },
+        })
+        if (!grant) return { error: 'not_found' as const }
+        if (grant.status === 'revoked') return { error: 'revoked' as const }
+        if (grant.status === 'expired') return { error: 'expired' as const }
+        if (grant.status === 'consumed') return { error: 'not_found' as const }
+        // 确认消息与展示绑定行必须仍活跃（撤回/rewind 归档即撤销未消费授权）。
+        const confirmation = await tx.sessionMessage.findFirst({
+          where: { id: p.confirmationMessageId, sessionId: grant.sessionId, role: 'user', archivedAt: null },
+          select: { id: true },
+        })
+        const presentation = await tx.reflectionPresentation.findFirst({
+          where: { displayId: grant.displayId, ownerId: p.ownerId },
+        })
+        const bound = presentation?.messageId
+          ? await tx.sessionMessage.findFirst({ where: { id: presentation.messageId, archivedAt: null }, select: { id: true } })
+          : null
+        if (
+          !confirmation ||
+          !presentation ||
+          presentation.messageId === null ||
+          presentation.status === 'revoked' ||
+          presentation.status === 'deleted' ||
+          !bound
+        ) {
+          await releaseGrant(tx, { ownerId: p.ownerId, grant, now: p.now, status: 'revoked' })
+          return { error: 'revoked' as const }
+        }
+        if (grant.expiresAt.getTime() <= p.now.getTime()) {
+          // 过窗：撤授权、草稿回 pending、旧展示撤销——必须重新展示后再次确认。
+          await releaseGrant(tx, { ownerId: p.ownerId, grant, now: p.now, status: 'expired' })
+          return { error: 'expired' as const }
+        }
+        if (grant.submissions >= 3) return { error: 'limit' as const }
+        // 失败尝试也计数（本事务返回错误值时随事务提交）；CAS：只有仍 active 且未达上限才计数。
+        const bumped = await tx.reflectionGrant.updateMany({
+          where: { id: grant.id, status: 'active', submissions: { lt: 3 } },
+          data: { submissions: { increment: 1 } },
+        })
+        if (bumped.count !== 1) return { error: 'conflict' as const }
+
+        const draftRow = await tx.reflectionDraft.findFirst({
+          where: { id: p.draftId, ownerId: p.ownerId, version: p.draftVersion },
+        })
+        if (!draftRow || draftRow.status !== 'confirmed_pending_save') return { error: 'conflict' as const }
+        const evidenceRows = await tx.reflectionEvidence.findMany({
+          where: { draftId: p.draftId, draftVersion: p.draftVersion },
+          orderBy: { position: 'asc' },
+        })
+        if (evidenceRows.length === 0 || !evidenceRows.every((r) => r.status === 'valid')) {
+          return { error: 'conflict' as const }
+        }
+        // 正式保存的正文必须与用户实际看到的版本逐字一致（服务端重算 hash）。
+        const body = parseBody(draftRow.contentJson)
+        const evidence = evidenceOf(evidenceRows)
+        const bodyJson = presentationJson({ body, evidence, version: draftRow.version, action: grant.action })
+        const bodyHash = sha256(bodyJson)
+        if (bodyHash !== grant.bodyHash) return { error: 'conflict' as const }
+
+        const revision = 1
+        const record = await tx.reflectionRecord.create({
+          data: {
+            ownerId: p.ownerId,
+            sessionId: draftRow.sessionId,
+            title: draftRow.title,
+            category: draftRow.category,
+            contentJson: draftRow.contentJson,
+            status: 'active',
+            evidenceStatus: 'valid',
+            currentRevision: revision,
+            generation: 1,
+          },
+        })
+        await tx.reflectionRevision.create({
+          data: {
+            recordId: record.id,
+            version: revision,
+            bodyJson,
+            bodyHash,
+            evidenceJson: JSON.stringify(evidence),
+          },
+        })
+        // 运维事件写失败 → 整笔回滚（不留下无事件的正式结果）。
+        if (this.options.failEventWrite?.('record_commit')) throw new Error('injected event write failure')
+        await tx.reflectionEvent.create({
+          data: { ownerId: p.ownerId, objectId: record.id, action: 'record_commit', version: revision, result: 'ok' },
+        })
+        const result: CommitResult = {
+          recordId: record.id,
+          revision,
+          title: record.title,
+          category: record.category,
+          status: record.status,
+          evidenceStatus: record.evidenceStatus,
+        }
+        await tx.reflectionIdempotency.create({
+          data: { key, ownerId: p.ownerId, recordId: record.id, resultJson: JSON.stringify(result) },
+        })
+        const consumed = await tx.reflectionGrant.updateMany({
+          where: { id: grant.id, status: 'active' },
+          data: { status: 'consumed', consumedAt: p.now },
+        })
+        // 消费 CAS 失败 = 并发已改变授权；整笔回滚，不产生半套正式结果。
+        if (consumed.count !== 1) throw new Error('reflection grant consumed concurrently')
+        await tx.reflectionDraft.update({ where: { id: draftRow.id }, data: { status: 'committed', closedAt: p.now } })
+        return { result, idempotent: false }
+      })
+    } catch (err) {
+      // 并发重复提交：唯一约束败方读回已提交结果（结果未知后查实况）。
+      if ((err as { code?: string }).code === 'P2002') {
+        const existing = await this.prisma.reflectionIdempotency.findUnique({ where: { key } })
+        if (existing) return { result: parseCommitResult(existing.resultJson), idempotent: true }
+      }
+      throw err
+    }
+  }
+
+  async applyDecision(p: {
+    ownerId: string
+    draftId: string
+    decision: 'reject' | 'revise' | 'withdraw'
+    now: Date
+  }): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const draft = await tx.reflectionDraft.findFirst({ where: { id: p.draftId, ownerId: p.ownerId } })
+      if (!draft) return
+      // 未提交的确认一律撤销；已消费的授权不动（已提交记录独立保留）。
+      await tx.reflectionGrant.updateMany({
+        where: { ownerId: p.ownerId, draftId: draft.id, status: 'active' },
+        data: { status: 'revoked' },
+      })
+      await tx.reflectionPresentation.updateMany({
+        where: { ownerId: p.ownerId, draftId: draft.id, status: { in: ['active', 'acked'] } },
+        data: { status: 'revoked', revokedAt: p.now },
+      })
+      if (draft.status === 'committed' || draft.status === 'cancelled' || draft.status === 'rejected') return
+      if (p.decision === 'reject') {
+        await tx.reflectionEvidence.deleteMany({ where: { draftId: draft.id } })
+        await tx.reflectionDraft.update({
+          where: { id: draft.id },
+          data: { status: 'rejected', closedAt: p.now, contentJson: '{}', title: '' },
+        })
+      } else {
+        // revise/withdraw：保留正文供 Leader 修订/重新展示，但必须重新展示确认。
+        await tx.reflectionDraft.update({ where: { id: draft.id }, data: { status: 'pending' } })
+      }
+      await tx.reflectionEvent.create({
+        data: { ownerId: p.ownerId, objectId: draft.id, action: `draft_${p.decision}`, version: draft.version, result: 'ok' },
+      })
+    })
+  }
+
+  async revokeActiveGrants(ownerId: string, draftId: string): Promise<void> {
+    await this.prisma.reflectionGrant.updateMany({
+      where: { ownerId, draftId, status: 'active' },
+      data: { status: 'revoked' },
+    })
+  }
+}
+
+function idempotencyKey(ownerId: string, confirmationMessageId: string): string {
+  return `${ownerId}:${confirmationMessageId}`
+}
+
+// 撤授权 + 草稿回 pending + 旧展示撤销（过窗/rewind 共用；已提交记录不受影响）。
+async function releaseGrant(
+  tx: ReflectionTx,
+  p: {
+    ownerId: string
+    grant: { id: string; draftId: string; draftVersion: number }
+    now: Date
+    status: 'revoked' | 'expired'
+  },
+): Promise<void> {
+  await tx.reflectionGrant.updateMany({
+    where: { id: p.grant.id, ownerId: p.ownerId, status: 'active' },
+    data: { status: p.status },
+  })
+  await tx.reflectionDraft.updateMany({
+    where: {
+      id: p.grant.draftId,
+      ownerId: p.ownerId,
+      version: p.grant.draftVersion,
+      status: 'confirmed_pending_save',
+    },
+    data: { status: 'pending' },
+  })
+  await tx.reflectionPresentation.updateMany({
+    where: { ownerId: p.ownerId, draftId: p.grant.draftId, status: { in: ['active', 'acked'] } },
+    data: { status: 'revoked', revokedAt: p.now },
+  })
+}
+
+function parseCommitResult(raw: string): CommitResult {
+  return JSON.parse(raw) as CommitResult
+}
+
+function grantOf(row: {
+  id: string
+  ownerId: string
+  sessionId: string
+  confirmationMessageId: string
+  displayId: string
+  draftId: string
+  draftVersion: number
+  bodyHash: string
+  action: string
+  ackSeq: number
+  expiresAt: Date
+  submissions: number
+  status: string
+}): GrantRecord {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    sessionId: row.sessionId,
+    confirmationMessageId: row.confirmationMessageId,
+    displayId: row.displayId,
+    draftId: row.draftId,
+    draftVersion: row.draftVersion,
+    bodyHash: row.bodyHash,
+    action: row.action,
+    ackSeq: row.ackSeq,
+    expiresAt: row.expiresAt.toISOString(),
+    submissions: row.submissions,
+    status: row.status as GrantRecord['status'],
   }
 }
 

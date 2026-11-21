@@ -1,6 +1,7 @@
 import { createSessionHistoryTool, runWithHistoryContext } from '../historyTool'
 import type { HistoryRuntimePort } from '../../sessions/history/model'
 import { createReflectionTool } from '../reflectionTool'
+import { createReflectionConfirmationClassifier } from '../reflectionConfirmation'
 import { runWithReflectionContext, type ReflectionRunContext } from '../reflectionFrame'
 import { createReflectionDereferenceMiddleware } from '../reflectionDereference'
 import type { ReflectionsPort } from '../../reflections/runtime'
@@ -911,6 +912,21 @@ export class RunService {
     // #1080 RF-T04：reflections 仅主 Leader 图装配（teammate / 子线程 / 系统命令不接）。
     const reflectionsLeader = this.deps.reflections !== undefined &&
       !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
+    // #1081 RF-T05 · 基础 RF19：resume/recover 命令不带 triggerMessageId，从持久会话恢复稳定主请求
+    // 身份——interrupted/suspended 期间新主请求被拒，最新用户消息即原触发消息；恢复不新建身份。
+    let reflectionTriggerMessageId = cmd.triggerMessageId
+    if (
+      reflectionsLeader &&
+      reflectionTriggerMessageId === undefined &&
+      (cmd.kind === 'resume' || cmd.kind === 'recover')
+    ) {
+      const lastUser = await this.deps.prisma.sessionMessage.findFirst({
+        where: { sessionId: cmd.sessionId, role: 'user', archivedAt: null },
+        orderBy: { turn: 'desc' },
+        select: { id: true },
+      })
+      reflectionTriggerMessageId = lastUser?.id
+    }
 
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
     // re-ensure（stopped → start，文件保留），返回容器即 /lab/ 工具根（可能 ≠
@@ -945,6 +961,28 @@ export class RunService {
     const model = actor?.modelProviderId
       ? await this.deps.registry.getTeammateModel(snapshot, actor.modelProviderId)
       : await this.deps.registry.getDefaultModel(snapshot, preferred)
+    // #1081 RF-T05：真实用户消息入队后、主 Leader 图执行前做一次无工具确认识别。
+    // 识别故障/歧义不阻断原任务；授权签发与复核都在 reflections 业务口完成。
+    const reflections = this.deps.reflections
+    if (reflectionsLeader && reflections && cmd.kind === 'message' && cmd.operation === undefined && cmd.triggerMessageId !== undefined) {
+      try {
+        const outcome = await reflections.confirmTurn(
+          {
+            ownerId: cmd.ownerId,
+            currentSessionId: cmd.sessionId,
+            role: 'leader',
+            triggerMessageId: cmd.triggerMessageId,
+          },
+          createReflectionConfirmationClassifier(model),
+        )
+        if (outcome.status === 'ambiguous' || outcome.status === 'classifier_unavailable') {
+          console.warn(`[runner] reflection confirmation ${outcome.status}: run=${cmd.runId}`)
+        }
+      } catch (err) {
+        // 不写原文/正文；增强失败不影响主任务。
+        console.warn(`[runner] reflection confirmation failed: run=${cmd.runId}: ${(err as Error).message}`)
+      }
+    }
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
     const tools = this.deps.teammates
       ? createTeammateTools({
@@ -1302,7 +1340,13 @@ export class RunService {
         const reflectionLeader = !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
         const reflectionFrameLocal: ReflectionRunContext | undefined = this.deps.reflections && reflectionLeader
           ? {
-              context: { ownerId: cmd.ownerId, currentSessionId: cmd.sessionId, role: 'leader', runId: cmd.runId },
+              context: {
+                ownerId: cmd.ownerId,
+                currentSessionId: cmd.sessionId,
+                role: 'leader',
+                runId: cmd.runId,
+                ...(reflectionTriggerMessageId ? { triggerMessageId: reflectionTriggerMessageId } : {}),
+              },
               signal: controller.signal,
               presentations: [],
             }

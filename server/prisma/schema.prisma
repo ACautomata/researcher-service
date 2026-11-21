@@ -886,6 +886,8 @@ model ReflectionPresentation {
   // 绑定终态 assistant 消息行（recordTurn 统一接缝回填；未绑定不可授权）
   messageId String?
   ackSeq    Int?
+  // ack 时刻会话最大 turn（服务端单调序号）：确认消息 turn 必须更大才可能获得授权。
+  ackTurn   Int?
   ackedAt   DateTime?
   revokedAt DateTime?
   createdAt DateTime @default(now())
@@ -893,6 +895,92 @@ model ReflectionPresentation {
   @@index([ownerId, draftId])
   @@index([sessionId])
   @@map("reflection_presentations")
+}
+
+// ---------------------------------------------------------------------------
+// ReflectionRecord / ReflectionRevision / ReflectionGrant / ReflectionIdempotency
+// （#1081 · RF-T05）：正式记录 = 用户自然语言确认后的不可变版本存入；
+// 授权绑定真实确认消息与展示，commit 只凭可信上下文查 grant，模型参数无 approved/token。
+// ---------------------------------------------------------------------------
+
+model ReflectionRecord {
+  id      String @id @default(cuid())
+  ownerId String
+  // 发起会话（来源会话删除不级联删除已提交结论——本表不对 sessions 建外键）。
+  sessionId String
+  title     String
+  category  String
+  // 五部分正文快照（与不可变 revision 同步；正式记录的稳定副本）。
+  contentJson String
+  // active | inactive | superseded | deleted
+  status String @default("active")
+  // valid | review_required（来源失效退出主动使用；T08 完整闭环）
+  evidenceStatus  String @default("valid")
+  currentRevision Int    @default(1)
+  generation      Int    @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  revisions ReflectionRevision[]
+
+  @@index([ownerId, status])
+  @@index([ownerId, updatedAt])
+  @@map("reflection_records")
+}
+
+model ReflectionRevision {
+  id           String @id @default(cuid())
+  recordId     String
+  version      Int
+  // 不可变版本正文 + 证据引用/摘录快照（旧版本只供管理读取，不主动使用）。
+  bodyJson     String
+  bodyHash     String
+  evidenceJson String
+  createdAt    DateTime @default(now())
+
+  record ReflectionRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+
+  @@unique([recordId, version])
+  @@map("reflection_revisions")
+}
+
+model ReflectionGrant {
+  id                    String @id @default(cuid())
+  ownerId               String
+  sessionId             String
+  // 真实当前用户确认消息（稳定主请求身份）；一条消息最多一个完整动作。
+  confirmationMessageId String
+  displayId             String
+  draftId               String
+  draftVersion          Int
+  bodyHash              String
+  action                String
+  // 展示 ack 的服务端单调序号（ack 必须早于确认消息）。
+  ackSeq                Int
+  // 10 分钟绝对到期（不续期）。
+  expiresAt             DateTime
+  // 提交尝试计数（最多 3 次，成功/失败都计入）。
+  submissions           Int      @default(0)
+  // active | consumed | revoked | expired
+  status                String   @default("active")
+  createdAt             DateTime @default(now())
+  consumedAt            DateTime?
+
+  @@unique([ownerId, confirmationMessageId])
+  @@index([ownerId, draftId, status])
+  @@map("reflection_grants")
+}
+
+model ReflectionIdempotency {
+  // `${ownerId}:${confirmationMessageId}`——同一确认消息只产生一个正式结果。
+  key        String   @id
+  ownerId    String
+  recordId   String
+  resultJson String
+  createdAt  DateTime @default(now())
+
+  @@index([ownerId])
+  @@map("reflection_idempotency")
 }
 
 model ReflectionEvent {

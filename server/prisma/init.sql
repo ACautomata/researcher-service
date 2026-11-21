@@ -474,6 +474,7 @@ CREATE TABLE "reflection_presentations" (
     "status" TEXT NOT NULL DEFAULT 'active',
     "messageId" TEXT,
     "ackSeq" INTEGER,
+    "ackTurn" INTEGER,
     "ackedAt" DATETIME,
     "revokedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -491,6 +492,62 @@ CREATE TABLE "reflection_events" (
     "version" INTEGER,
     "result" TEXT NOT NULL,
     "category" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "reflection_records" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "contentJson" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "evidenceStatus" TEXT NOT NULL DEFAULT 'valid',
+    "currentRevision" INTEGER NOT NULL DEFAULT 1,
+    "generation" INTEGER NOT NULL DEFAULT 1,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
+CREATE TABLE "reflection_revisions" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "recordId" TEXT NOT NULL,
+    "version" INTEGER NOT NULL,
+    "bodyJson" TEXT NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "evidenceJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_revisions_recordId_fkey" FOREIGN KEY ("recordId") REFERENCES "reflection_records" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "reflection_grants" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "confirmationMessageId" TEXT NOT NULL,
+    "displayId" TEXT NOT NULL,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "ackSeq" INTEGER NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "submissions" INTEGER NOT NULL DEFAULT 0,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "consumedAt" DATETIME
+);
+
+-- CreateTable
+CREATE TABLE "reflection_idempotency" (
+    "key" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "recordId" TEXT NOT NULL,
+    "resultJson" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -652,4 +709,22 @@ CREATE INDEX "reflection_presentations_sessionId_idx" ON "reflection_presentatio
 
 -- CreateIndex
 CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
+
+-- CreateIndex
+CREATE INDEX "reflection_records_ownerId_status_idx" ON "reflection_records"("ownerId", "status");
+
+-- CreateIndex
+CREATE INDEX "reflection_records_ownerId_updatedAt_idx" ON "reflection_records"("ownerId", "updatedAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "reflection_revisions_recordId_version_key" ON "reflection_revisions"("recordId", "version");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");
+
+-- CreateIndex
+CREATE INDEX "reflection_grants_ownerId_draftId_status_idx" ON "reflection_grants"("ownerId", "draftId", "status");
+
+-- CreateIndex
+CREATE INDEX "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
 

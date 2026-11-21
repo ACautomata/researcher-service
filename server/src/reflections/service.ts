@@ -11,6 +11,12 @@ import {
   sha256,
 } from './content'
 import type {
+  ConfirmationActionSnapshot,
+  ConfirmationCandidate,
+  ConfirmationClassifier,
+  ConfirmationClassification,
+  ConfirmationDecision,
+  ConfirmationTurnOutcome,
   DraftBody,
   DraftRecord,
   EvidenceInput,
@@ -25,6 +31,7 @@ import type {
 import { ReflectionRecordsSchema, type ReflectionRequest } from './params'
 import {
   REFLECTION_CATEGORY_LABELS,
+  REFLECTION_CONFIRMATION_DECISIONS,
   reflectionBodyRef,
   reflectionDraftRef,
 } from './values'
@@ -32,7 +39,18 @@ import {
 export interface ReflectionServiceOptions {
   clock?: () => number
   events?: { record(event: { ownerId: string; operation: string; category: string; durationMs: number }): void | Promise<void> }
+  /** 测试注入确认分类器；缺省用调用方传入的模型适配器。 */
+  classifier?: ConfirmationClassifier
+  /** 单次识别 5 秒、每主请求最多 2 次（父规格 I5）。 */
+  classificationTimeoutMs?: number
+  classificationAttempts?: number
+  /** 授权绝对到期 10 分钟（不续期）。 */
+  grantTtlMs?: number
 }
+
+const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 5_000
+const DEFAULT_CLASSIFICATION_ATTEMPTS = 2
+const DEFAULT_GRANT_TTL_MS = 10 * 60_000
 
 function failure(category: ReflectionError['category'], code: ReflectionError['code'], message: string, operation = 'unknown'): ReflectionResult {
   return { outcome: 'failure', progress: 'complete', operation, error: { category, code, message } }
@@ -301,11 +319,10 @@ export class ReflectionService {
 
   private async present(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'present' }>): Promise<ReflectionResult> {
     const draft = await this.store.getDraft(context.ownerId, request.draft_id)
-    if (!draft || draft.sessionId !== context.currentSessionId) {
-      return failure('parameter', 'not_found', '草稿不存在或不属于当前会话', 'present')
-    }
+    // 跨会话：本人草稿可在新会话重新调出展示（展示归属当前会话，授权绑定当前确认消息）。
+    if (!draft) return failure('parameter', 'not_found', '草稿不存在', 'present')
     if (draft.version !== request.version) return failure('conflict', 'conflict', '草稿版本已变化，请重新展示最新版本', 'present')
-    if (draft.status === 'cancelled' || draft.status === 'committed') {
+    if (draft.status === 'cancelled' || draft.status === 'committed' || draft.status === 'rejected') {
       return failure('conflict', 'not_ready', '草稿已关闭，不能展示', 'present')
     }
     // 展示前复核来源可见性与内容版本（父规格 I4）；失效即回 preparing，不得展示为可确认版本。
@@ -351,31 +368,58 @@ export class ReflectionService {
 
   private async commit(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'commit' }>): Promise<ReflectionResult> {
     const draft = await this.store.getDraft(context.ownerId, request.draft_id)
-    if (!draft || draft.sessionId !== context.currentSessionId) return failure('parameter', 'not_found', '草稿不存在或不属于当前会话', 'commit')
+    if (!draft) return failure('parameter', 'not_found', '草稿不存在', 'commit')
     if (draft.version !== request.version) return failure('conflict', 'conflict', '草稿版本已变化', 'commit')
-    if (draft.status !== 'pending') return failure('conflict', 'not_ready', '证据尚未完成持久化核验，草稿不可确认', 'commit')
+    // 正式保存只认「真实确认消息」对应的内部授权；模型参数没有 approved/grant/token。
+    if (context.triggerMessageId === undefined) {
+      return failure('conflict', 'confirmation_required', '需要用户在完整展示后用自然语言确认，才能保存', 'commit')
+    }
+    // 确认消息活跃性、展示绑定、授权状态与幂等结果均在 commitGrant 事务内 CAS 复核：
+    // 已提交的幂等重试先命中幂等结果（即使确认消息后来被撤回/回退也返回原结果）。
     // 提交前再次复核来源（I4）：失效即拒绝，不把过期证据当作可确认版本。
     const stale = await this.reverifyEvidence(context, draft)
     if (stale !== null) {
       await this.store.invalidateVersion(context.ownerId, draft.id, draft.version, stale)
+      await this.store.revokeActiveGrants(context.ownerId, draft.id)
       return failure('conflict', 'not_ready', `证据来源已变化（${stale}），请重新起草`, 'commit')
     }
-    // 展示前置（父规格 I5 / RF04「没有展示不能 confirm」）：须有本版本展示、已绑定终态 assistant
-    // 消息、且浏览器已提交 ack。缺任一项明确 not_ready，要求重新完整展示后确认。
-    const presentation = await this.store.latestPresentation(context.ownerId, draft.id)
-    if (!presentation || presentation.draftVersion !== draft.version) {
-      return failure('conflict', 'not_ready', '草稿尚未完整展示，请先 present 并让用户看到该版本', 'commit')
+    const outcome = await this.store.commitGrant({
+      ownerId: context.ownerId,
+      confirmationMessageId: context.triggerMessageId,
+      draftId: draft.id,
+      draftVersion: draft.version,
+      now: new Date(this.clock()),
+    })
+    if ('error' in outcome) {
+      switch (outcome.error) {
+        case 'expired':
+          return failure('conflict', 'expired', '确认授权已过窗，请重新展示最新版本并再次确认', 'commit')
+        case 'revoked':
+          return failure('conflict', 'revoked', '确认授权已撤回，不能保存', 'commit')
+        case 'limit':
+          return failure('limit', 'limit', '提交次数已达上限，请重新展示并确认', 'commit')
+        case 'conflict':
+          return failure('conflict', 'conflict', '草稿或证据已变化，请重新展示并确认', 'commit')
+        default:
+          return failure('conflict', 'confirmation_required', '需要用户在完整展示后用自然语言确认，才能保存', 'commit')
+      }
     }
-    if (presentation.messageId === null || presentation.status !== 'acked') {
-      return failure('conflict', 'not_ready', '展示尚未绑定终态消息或客户端未完成渲染确认', 'commit')
-    }
-    // 本票不签发确认授权（RF-T05 归 #1081）；草稿无确认不得进入正式记录。
-    return failure('conflict', 'confirmation_required', '需要用户在完整展示后用自然语言确认，才能保存', 'commit')
+    return success('commit', {
+      record: {
+        record_id: outcome.result.recordId,
+        revision: outcome.result.revision,
+        title: outcome.result.title,
+        category: outcome.result.category,
+        status: outcome.result.status,
+        evidence_status: outcome.result.evidenceStatus,
+      },
+      ...(outcome.idempotent ? { idempotent: true } : {}),
+    }, '正式反思记录已保存。后续经验检索归后续票；本票不开放主动检索。')
   }
 
   private async cancel(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'cancel' }>): Promise<ReflectionResult> {
     const draft = await this.store.getDraft(context.ownerId, request.draft_id)
-    if (!draft || draft.sessionId !== context.currentSessionId) return failure('parameter', 'not_found', '草稿不存在或不属于当前会话', 'cancel')
+    if (!draft) return failure('parameter', 'not_found', '草稿不存在', 'cancel')
     if (request.version !== undefined && request.version !== draft.version) return failure('conflict', 'conflict', '草稿版本已变化', 'cancel')
     if (draft.status === 'committed') return failure('conflict', 'conflict', '已保存记录不能按草稿撤回', 'cancel')
     const closed = await this.store.cancelDraft(context.ownerId, draft.id)
@@ -417,7 +461,6 @@ export class ReflectionService {
     for (const e of draft.evidence) {
       if (e.status !== 'valid') continue
       if (e.messageId === null) return 'in_flight_unbound'
-      if (e.sessionId !== context.currentSessionId) return 'cross_session'
       const source = await this.evidence.readRegion(context, e.sessionId, e.messageId, e.region, e.toolCallId ?? undefined)
       if (!source || !source.regionPresent) return 'source_unavailable'
       if (source.contentVersion !== e.contentVersion) return 'content_changed'
@@ -433,6 +476,125 @@ export class ReflectionService {
       bodyHash: input.hash,
       messageId: input.messageId,
     })
+  }
+
+  // ---- 自然语言确认授权（#1081 · RF-T05，父规格 I5）----
+  //
+  // 在用户消息入队后、主 Leader 图执行前调用：分类器只读真实确认消息原文与服务端唯一动作快照。
+  // 分类结果不等于授权——签发前服务端复核 ack 先后、版本/hash/来源/候选唯一，再短事务 CAS。
+  async confirmTurn(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
+    const started = this.clock()
+    const outcome = await this.confirmTurnInner(context, fallback)
+    try {
+      // 确认日志字段白名单：只记分类结果/耗时，不记原文或正文。
+      await this.options.events?.record({
+        ownerId: context.ownerId,
+        operation: 'confirm',
+        category: outcome.status,
+        durationMs: Math.max(0, this.clock() - started),
+      })
+    } catch {
+      // 访问日志故障告警但可继续已授权操作（RF18）；不记录原文/正文。
+      console.warn(`[reflections] confirmation access log failed: owner=${context.ownerId} status=${outcome.status}`)
+    }
+    return outcome
+  }
+
+  private async confirmTurnInner(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
+    const skipped = (reason: string): ConfirmationTurnOutcome => ({ status: 'skipped', reason })
+    if (context.role !== 'leader') return skipped('not_leader')
+    if (context.triggerMessageId === undefined) return skipped('no_trigger')
+    const trigger = await this.store.getTriggerMessage(context.ownerId, context.currentSessionId, context.triggerMessageId)
+    if (!trigger) return skipped('trigger_missing')
+
+    const candidates = await this.store.confirmationCandidates(context.ownerId, context.currentSessionId, trigger.turn)
+    // 多候选无明确目标 = 歧义；一条消息只确认一个完整动作。
+    if (candidates.length > 1) return { status: 'ambiguous', reason: 'multiple_candidates' }
+    if (candidates.length === 0) return skipped('no_candidate')
+    const candidate = candidates[0]
+
+    const previousUserMessages = await this.store.recentUserMessages(
+      context.ownerId,
+      context.currentSessionId,
+      trigger.turn,
+      2,
+    )
+    const classifier = this.options.classifier ?? fallback
+    let classification: ConfirmationClassification
+    try {
+      classification = await this.classifyConfirmation(classifier, {
+        userText: trigger.content,
+        previousUserMessages,
+        action: confirmationSnapshot(candidate),
+      })
+    } catch {
+      // 识别故障/超时没有授权，原任务可继续（不把失败伪装成确认或不确认）。
+      return { status: 'classifier_unavailable', reason: 'classifier_failed' }
+    }
+
+    if (classification.decision !== 'confirm') {
+      const effect = NON_CONFIRM_EFFECTS[classification.decision]
+      if (effect.storage !== undefined) {
+        // 未提交就撤授权；revise/withdraw 保留草稿但必须重新展示确认，reject 直接关闭草稿。
+        await this.store.applyDecision({
+          ownerId: context.ownerId,
+          draftId: candidate.draft.id,
+          decision: effect.storage,
+          now: new Date(this.clock()),
+        })
+      }
+      return {
+        status: effect.status,
+        decision: classification.decision,
+        ...(classification.reason !== undefined ? { reason: classification.reason } : {}),
+      }
+    }
+
+    // 来源复核在事务外（只读），事务内只做 CAS + 事件 + 授权写入（LLM 永不进事务）。
+    const stale = await this.reverifyEvidence(context, candidate.draft)
+    if (stale !== null) {
+      await this.store.invalidateVersion(context.ownerId, candidate.draft.id, candidate.draft.version, stale)
+      return skipped('evidence_changed')
+    }
+    const ttl = this.options.grantTtlMs ?? DEFAULT_GRANT_TTL_MS
+    const grant = await this.store.issueGrant({
+      ownerId: context.ownerId,
+      sessionId: context.currentSessionId,
+      confirmationMessageId: trigger.id,
+      confirmationTurn: trigger.turn,
+      candidate,
+      expiresAt: new Date(this.clock() + ttl),
+    })
+    if (!grant) return skipped('not_eligible')
+    return {
+      status: 'granted',
+      grantId: grant.id,
+      displayId: grant.displayId,
+      draftId: grant.draftId,
+      version: grant.draftVersion,
+    }
+  }
+
+  private async classifyConfirmation(
+    classifier: ConfirmationClassifier,
+    input: Parameters<ConfirmationClassifier>[0],
+  ): Promise<ConfirmationClassification> {
+    const attempts = this.options.classificationAttempts ?? DEFAULT_CLASSIFICATION_ATTEMPTS
+    const timeoutMs = this.options.classificationTimeoutMs ?? DEFAULT_CLASSIFICATION_TIMEOUT_MS
+    let lastError: unknown
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const result = await withTimeout(
+          classifier(input, AbortSignal.timeout(timeoutMs)),
+          timeoutMs,
+        )
+        if (REFLECTION_CONFIRMATION_DECISIONS.includes(result.decision)) return result
+        lastError = new Error('invalid classification')
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('classification failed')
   }
 
   /** 模型输入解引用：把展示引用临时展开为完整五部分文本（只在本次 invoke/stream 的内存克隆中）。 */
@@ -505,6 +667,46 @@ function draftSummary(draft: DraftRecord): Record<string, unknown> {
     title: draft.body.title,
     category: draft.body.category,
     updated_at: draft.updatedAt,
+  }
+}
+
+const NON_CONFIRM_EFFECTS: Record<
+  Exclude<ConfirmationDecision, 'confirm'>,
+  { status: ConfirmationTurnOutcome['status']; storage?: 'reject' | 'revise' | 'withdraw' }
+> = {
+  reject: { status: 'rejected', storage: 'reject' },
+  revise: { status: 'revise', storage: 'revise' },
+  withdraw: { status: 'withdrawn', storage: 'withdraw' },
+  unrelated: { status: 'unrelated' },
+  ambiguous: { status: 'ambiguous' },
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('classification timeout')), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
+function confirmationSnapshot(candidate: ConfirmationCandidate): ConfirmationActionSnapshot {
+  return {
+    displayId: candidate.presentation.displayId,
+    draftId: candidate.draft.id,
+    version: candidate.draft.version,
+    bodyHash: candidate.presentation.bodyHash,
+    action: candidate.presentation.action,
+    title: candidate.draft.body.title,
+    category: candidate.draft.body.category,
+    evidenceCount: candidate.draft.evidence.length,
   }
 }
 

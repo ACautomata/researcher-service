@@ -8,6 +8,7 @@ import { ReflectionService } from './service'
 
 export interface ReflectionsPort {
   execute: ReflectionService['execute']
+  confirmTurn: ReflectionService['confirmTurn']
   displayBodyText: ReflectionService['displayBodyText']
   draftBodyText: ReflectionService['draftBodyText']
   bindInFlightEvidence: PrismaReflectionStore['bindInFlightEvidence']
@@ -19,11 +20,16 @@ export interface ReflectionsRuntime {
   readonly port: ReflectionsPort
 }
 
-export function createReflectionsRuntime(prisma: PrismaClient): ReflectionsRuntime {
-  const store = new PrismaReflectionStore(prisma)
-  const service = new ReflectionService(store, store)
+export function createReflectionsRuntime(
+  prisma: PrismaClient,
+  options: ConstructorParameters<typeof ReflectionService>[2] = {},
+  storeOptions: ConstructorParameters<typeof PrismaReflectionStore>[1] = {},
+): ReflectionsRuntime {
+  const store = new PrismaReflectionStore(prisma, storeOptions)
+  const service = new ReflectionService(store, store, options)
   const port: ReflectionsPort = {
     execute: (context, request, signal) => service.execute(context, request, signal),
+    confirmTurn: (context, classifier) => service.confirmTurn(context, classifier),
     displayBodyText: (ownerId, displayId) => service.displayBodyText(ownerId, displayId),
     draftBodyText: (ownerId, draftId, version) => service.draftBodyText(ownerId, draftId, version),
     bindInFlightEvidence: (p) => store.bindInFlightEvidence(p),

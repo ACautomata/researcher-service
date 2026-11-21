@@ -50,6 +50,17 @@ export type ReflectionPresentationStatus = (typeof REFLECTION_PRESENTATION_STATU
 export const REFLECTION_REGIONS = ['content', 'thinking', 'tool_result'] as const
 export type ReflectionRegion = (typeof REFLECTION_REGIONS)[number]
 
+// 自然语言确认的 6 类结构化结果（#1081 · RF-T05）：分类器、schema 与业务共用单一来源。
+export const REFLECTION_CONFIRMATION_DECISIONS = [
+  'confirm',
+  'reject',
+  'revise',
+  'withdraw',
+  'unrelated',
+  'ambiguous',
+] as const
+export type ReflectionConfirmationDecision = (typeof REFLECTION_CONFIRMATION_DECISIONS)[number]
+
 export const REFLECTION_LIMITS = {
   titleCodePoints: 256,
   bodyBytes: 32 * 1024,

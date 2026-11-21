@@ -3,12 +3,13 @@
 // 公共业务口 = execute(context, request, signal)。所有身份/预算来自可信 context，模型参数
 // 不得覆盖 owner、角色或当前会话。
 
-import type {
-  ReflectionCategory,
-  ReflectionDraftStatus,
-  ReflectionEvidenceStatus,
-  ReflectionPresentationStatus,
-  ReflectionRegion,
+import {
+  REFLECTION_CONFIRMATION_DECISIONS,
+  type ReflectionCategory,
+  type ReflectionDraftStatus,
+  type ReflectionEvidenceStatus,
+  type ReflectionPresentationStatus,
+  type ReflectionRegion,
 } from './values'
 
 export interface ReflectionContext {
@@ -17,6 +18,8 @@ export interface ReflectionContext {
   readonly role: 'leader' | 'teammate' | 'wiki-update' | 'subagent'
   /** 当前主请求 run 身份：在飞证据（当前轮 assistant 行尚未落库）临时定位用。 */
   readonly runId?: string
+  /** 可信触发用户消息行 id（稳定主请求身份）：确认授权与幂等提交只认这一条。 */
+  readonly triggerMessageId?: string
 }
 
 // ---- 内容（五部分）----
@@ -129,6 +132,98 @@ export interface PresentationRef {
   readonly confirmable: boolean
 }
 
+// ---- 确认授权（#1081 · RF-T05）----
+
+export type ConfirmationDecision = (typeof REFLECTION_CONFIRMATION_DECISIONS)[number]
+
+// 服务端生成的唯一动作快照（分类器只读它，不接收模型可自填的 approved/grant/token）。
+export interface ConfirmationActionSnapshot {
+  readonly displayId: string
+  readonly draftId: string
+  readonly version: number
+  readonly bodyHash: string
+  readonly action: string
+  readonly title: string
+  readonly category: string
+  readonly evidenceCount: number
+}
+
+export interface ConfirmationClassifierInput {
+  /** 真实 triggerMessageId 的原文（服务端从库读取，不采用 run 命令副本）。 */
+  readonly userText: string
+  /** 至多前 2 条真实用户消息（辅助指代；不含触发消息）。 */
+  readonly previousUserMessages: readonly string[]
+  readonly action: ConfirmationActionSnapshot
+}
+
+export interface ConfirmationClassification {
+  readonly decision: ConfirmationDecision
+  readonly reason?: string
+}
+
+export type ConfirmationClassifier = (
+  input: ConfirmationClassifierInput,
+  signal?: AbortSignal,
+) => Promise<ConfirmationClassification>
+
+export interface ConfirmationTurnOutcome {
+  readonly status:
+    | 'skipped'
+    | 'granted'
+    | 'ambiguous'
+    | 'rejected'
+    | 'revise'
+    | 'withdrawn'
+    | 'unrelated'
+    | 'classifier_unavailable'
+  readonly decision?: ConfirmationDecision
+  readonly grantId?: string
+  readonly displayId?: string
+  readonly draftId?: string
+  readonly version?: number
+  readonly reason?: string
+}
+
+export interface ReflectionTriggerMessage {
+  readonly id: string
+  readonly turn: number
+  readonly content: string
+}
+
+export interface ConfirmationCandidate {
+  readonly presentation: PresentationRecord
+  readonly draft: DraftRecord
+}
+
+export interface GrantRecord {
+  readonly id: string
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly confirmationMessageId: string
+  readonly displayId: string
+  readonly draftId: string
+  readonly draftVersion: number
+  readonly bodyHash: string
+  readonly action: string
+  readonly ackSeq: number
+  readonly expiresAt: string
+  readonly submissions: number
+  readonly status: 'active' | 'consumed' | 'revoked' | 'expired'
+}
+
+export interface CommitResult {
+  readonly recordId: string
+  readonly revision: number
+  readonly title: string
+  readonly category: string
+  readonly status: string
+  readonly evidenceStatus: string
+}
+
+export type CommitOutcome =
+  | { readonly result: CommitResult; readonly idempotent: boolean }
+  | { readonly error: 'not_found' | 'revoked' | 'expired' | 'limit' | 'conflict' }
+
 // ---- 端口 ----
 
 // 可信当前证据端口：只读本人当前主线程已持久产品投影；在飞目标由 recordTurn 统一补稳定引用。
@@ -180,8 +275,6 @@ export interface ReflectionStore {
   /** 来源核验失败：该版本证据全部标 not_ready、草稿回 preparing（展示/提交需重新起草）。 */
   invalidateVersion(ownerId: string, draftId: string, version: number, reason: string): Promise<void>
   getPresentation(ownerId: string, displayId: string): Promise<PresentationRecord | null>
-  /** 该草稿最近一次展示（commit 前置：有展示、已绑定终态消息、已 ack）。 */
-  latestPresentation(ownerId: string, draftId: string): Promise<PresentationRecord | null>
   /** recordTurn 统一接缝：绑定终态 assistant messageId 并解析在飞证据。 */
   bindInFlightEvidence(p: {
     ownerId: string
@@ -197,6 +290,51 @@ export interface ReflectionStore {
     bodyHash: string
     messageId: string
   }): Promise<{ seq: number; ackedAt: string } | { error: 'not_found' | 'conflict' | 'not_ready' }>
+
+  // ---- 确认授权（#1081 · RF-T05）----
+
+  /** 可信 triggerMessageId 行（本人当前会话、user 角色、未归档）。 */
+  getTriggerMessage(ownerId: string, sessionId: string, messageId: string): Promise<ReflectionTriggerMessage | null>
+  /** 当前会话内可确认候选（acked、绑定终态 assistant 行、草稿 pending、证据全部 valid）。 */
+  confirmationCandidates(ownerId: string, sessionId: string, beforeTurn: number): Promise<ConfirmationCandidate[]>
+  /** 确认消息之前的至多 limit 条真实用户消息（时间升序）。 */
+  recentUserMessages(ownerId: string, sessionId: string, beforeTurn: number, limit: number): Promise<string[]>
+  /**
+   * 短事务 CAS 签发授权：确认展示仍未变化、草稿仍 pending、证据全部 valid，
+   * 同事务写最小事件；任一不符整体 null（无部分授权）。
+   */
+  issueGrant(p: {
+    ownerId: string
+    sessionId: string
+    confirmationMessageId: string
+    /** 确认消息 turn（服务端单调序：必须晚于展示 ack 时刻）。 */
+    confirmationTurn: number
+    candidate: ConfirmationCandidate
+    expiresAt: Date
+  }): Promise<GrantRecord | null>
+  /**
+   * 一事务消费 grant + 写 record/revision + 最小事件 + 幂等结果。
+   * 失败尝试的提交计数随事务提交；事件写失败抛错整笔回滚。
+   */
+  commitGrant(p: {
+    ownerId: string
+    confirmationMessageId: string
+    draftId: string
+    draftVersion: number
+    now: Date
+  }): Promise<CommitOutcome>
+  /**
+   * 用户对候选说 reject/revise/withdraw：撤销未消费授权与展示；
+   * reject 关闭草稿，revise/withdraw 回 pending（需重新展示后再次确认）。
+   */
+  applyDecision(p: {
+    ownerId: string
+    draftId: string
+    decision: 'reject' | 'revise' | 'withdraw'
+    now: Date
+  }): Promise<void>
+  /** 证据/版本失效时撤销该草稿的未消费授权（已消费的不动）。 */
+  revokeActiveGrants(ownerId: string, draftId: string): Promise<void>
 }
 
 // ---- 结果 ----
@@ -210,6 +348,8 @@ export type ReflectionErrorCode =
   | 'not_found'
   | 'not_ready'
   | 'confirmation_required'
+  | 'expired'
+  | 'revoked'
   | 'conflict'
   | 'limit'
   | 'cancelled'
@@ -229,6 +369,7 @@ export interface ReflectionResult {
   readonly presentation?: unknown
   readonly drafts?: unknown
   readonly records?: unknown
+  readonly record?: unknown
   readonly count?: number
   readonly purpose?: string
   readonly confirmable?: boolean
