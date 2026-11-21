@@ -27,6 +27,8 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const sql = readFileSync(path.join(here, '..', 'prisma', 'init.sql'), 'utf8')
 // #1078：历史读取变更版本触发器（SQL 含 BEGIN…END 分号，整文件 exec）。
 const triggersSql = readFileSync(path.join(here, '..', 'prisma', 'history-triggers.sql'), 'utf8')
+// #1084：来源变化/删除/rewind → 反思证据同步封锁 + 清理 outbox 入队（同事务触发器）。
+const reflectionTriggersSql = readFileSync(path.join(here, '..', 'prisma', 'reflection-triggers.sql'), 'utf8')
 const url = process.env.DATABASE_URL ?? 'file:./prisma/panel.db'
 const dbPath = url.replace(/^file:/, '')
 
@@ -68,6 +70,7 @@ try {
   }
   runIncrementalSchema(db)
   db.exec(triggersSql)
+  db.exec(reflectionTriggersSql)
 } finally {
   db.close()
 }

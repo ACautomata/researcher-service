@@ -4,9 +4,23 @@
 // 证据位置由服务端从真实来源核验（模型自填的 hash/位置不作证明）。
 
 import { createHash } from 'node:crypto'
-import { SENSITIVE_PATTERNS, SENSITIVE_PLACEHOLDER, REFLECTION_LIMITS } from './values'
+import {
+  REFLECTION_INVALID_EXCERPT_PLACEHOLDER,
+  REFLECTION_INVALID_FRAGMENT_PLACEHOLDER,
+  REFLECTION_LIMITS,
+  REFLECTION_SOURCE_INVALID_REASONS,
+  SENSITIVE_PATTERNS,
+  SENSITIVE_PLACEHOLDER,
+} from './values'
 import type { ReflectionEvidenceStatus } from './values'
-import type { CauseAnalysis, DraftBody, DraftScope, EvidenceInput, EvidenceRecord } from './model'
+import type {
+  CauseAnalysis,
+  DraftBody,
+  DraftScope,
+  EvidenceInput,
+  EvidenceRecord,
+  RecordEvidenceRecord,
+} from './model'
 
 export const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex')
 
@@ -168,7 +182,160 @@ export function evidenceViews(evidence: readonly EvidenceRecord[]): EvidenceView
   }))
 }
 
+// ---- #1084（RF-T08）：来源失效摘录与正文副本的同步封锁/清理 ----
+
+export function isSourceInvalidReason(reason: string | undefined): boolean {
+  return reason !== undefined && (REFLECTION_SOURCE_INVALID_REASONS as readonly string[]).includes(reason)
+}
+
+/** 失效草稿证据的摘录原文（读门封锁 + 正文副本清理的 needle 集合）。 */
+export function blockedDraftExcerpts(evidence: readonly EvidenceRecord[]): string[] {
+  return evidence
+    .filter((e) => e.status !== 'valid' && isSourceInvalidReason(e.reason))
+    .map((e) => e.excerpt)
+    .filter((text) => text.length > 0)
+}
+
+export function blockedRecordExcerpts(evidence: readonly RecordEvidenceRecord[]): string[] {
+  return evidence
+    .filter((e) => e.status === 'invalid')
+    .map((e) => e.excerpt)
+    .filter((text) => text.length > 0)
+}
+
+/** 把正文中逐字复制的来源片段替换为占位（父规格 I4：不按字段名区分，正文/原因同样清理）。 */
+export function scrubSourceFragment(text: string, excerpts: readonly string[]): string {
+  let out = text
+  // 长摘录优先，避免短摘录先替换后长摘录失配。
+  for (const needle of [...excerpts].sort((a, b) => b.length - a.length)) {
+    if (needle.length === 0) continue
+    out = out.split(needle).join(REFLECTION_INVALID_FRAGMENT_PLACEHOLDER)
+  }
+  return out
+}
+
+export function scrubDraftBody(body: DraftBody, excerpts: readonly string[]): DraftBody {
+  if (excerpts.length === 0) return body
+  const clean = (value: string): string => scrubSourceFragment(value, excerpts)
+  return {
+    title: clean(body.title),
+    category: body.category,
+    problem: clean(body.problem),
+    causes: body.causes.map((c) => ({ ...c, text: clean(c.text) })),
+    improvements: body.improvements.map(clean),
+    scope: {
+      labels: body.scope.labels.map(clean),
+      conditions: clean(body.scope.conditions),
+      exclusions: clean(body.scope.exclusions),
+    },
+  }
+}
+
+/** 展示/记录正文 JSON（含五部分 + 证据视图）的副本清理；不可解析时原样返回（不吞掉错误结构）。 */
+export function scrubBodyJson(raw: string, excerpts: readonly string[]): string {
+  if (excerpts.length === 0) return raw
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!value || typeof value !== 'object') return raw
+  const record = value as Record<string, unknown>
+  const body: DraftBody = {
+    title: typeof record.title === 'string' ? record.title : '',
+    category: typeof record.category === 'string' ? record.category as DraftBody['category'] : 'other',
+    problem: typeof record.problem === 'string' ? record.problem : '',
+    causes: Array.isArray(record.causes) ? record.causes as DraftBody['causes'] : [],
+    improvements: Array.isArray(record.improvements) ? record.improvements as string[] : [],
+    scope: record.scope && typeof record.scope === 'object'
+      ? {
+          labels: Array.isArray((record.scope as DraftScope).labels) ? (record.scope as DraftScope).labels : [],
+          conditions: typeof (record.scope as DraftScope).conditions === 'string' ? (record.scope as DraftScope).conditions : '',
+          exclusions: typeof (record.scope as DraftScope).exclusions === 'string' ? (record.scope as DraftScope).exclusions : '',
+        }
+      : { labels: [], conditions: '', exclusions: '' },
+  }
+  const cleaned = scrubDraftBody(body, excerpts)
+  const evidence = Array.isArray(record.evidence)
+    ? (record.evidence as Record<string, unknown>[]).map((item) => ({
+        ...item,
+        ...(typeof item.excerpt === 'string' ? { excerpt: scrubSourceFragment(item.excerpt, excerpts) } : {}),
+      }))
+    : record.evidence
+  return JSON.stringify({ ...record, ...cleaned, ...(evidence !== undefined ? { evidence } : {}) })
+}
+
+/** revision.evidenceJson（证据数组快照）中摘录副本的清理；非数组/不可解析时原样返回。 */
+export function scrubEvidenceJson(raw: string, excerpts: readonly string[]): string {
+  if (excerpts.length === 0) return raw
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!Array.isArray(value)) return raw
+  return JSON.stringify(value.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    const record = item as Record<string, unknown>
+    return typeof record.excerpt === 'string'
+      ? { ...record, excerpt: scrubSourceFragment(record.excerpt, excerpts) }
+      : record
+  }))
+}
+
+/** 读门证据视图：来源失效的摘录以占位替代，绝不把已封锁正文交回调用方。 */
+export function sanitizedDraftEvidenceViews(evidence: readonly EvidenceRecord[]): EvidenceView[] {
+  return evidenceViews(evidence).map((view, index) => {
+    const record = evidence[index]
+    if (record === undefined) return view
+    if (record.status !== 'valid' && isSourceInvalidReason(record.reason)) {
+      return { ...view, excerpt: REFLECTION_INVALID_EXCERPT_PLACEHOLDER }
+    }
+    return view
+  })
+}
+
+export function sanitizedRecordEvidenceViews(evidence: readonly RecordEvidenceRecord[]): Array<{
+  position: number
+  sessionId: string
+  messageId: string | null
+  toolCallId: string | null
+  region: string
+  start: number | null
+  end: number | null
+  excerpt: string
+  status: string
+  reason?: string
+}> {
+  return evidence.map((e) => ({
+    position: e.position,
+    sessionId: e.sessionId,
+    messageId: e.messageId,
+    toolCallId: e.toolCallId,
+    region: e.region,
+    start: e.startCp,
+    end: e.endCp,
+    excerpt: e.status === 'invalid' ? REFLECTION_INVALID_EXCERPT_PLACEHOLDER : e.excerpt,
+    status: e.status,
+    ...(e.reason !== undefined ? { reason: e.reason } : {}),
+  }))
+}
+
 // 展示正文的唯一序列化实现（hash 与持久正文同源——防两处副本漂移）。
+export interface BodyTextView {
+  readonly position: number
+  readonly sessionId: string
+  readonly messageId: string | null
+  readonly region: string
+  readonly start: number | null
+  readonly end: number | null
+  readonly excerpt: string
+  readonly status: string
+  readonly reason?: string
+}
+
 export function presentationPayload(p: {
   body: DraftBody
   evidence: readonly EvidenceRecord[]

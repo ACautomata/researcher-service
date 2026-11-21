@@ -4,10 +4,19 @@
 // ——正式记录与确认授权归 #1081（RF-T05）。草稿永远不会进入 experience 检索。
 
 import {
+  blockedDraftExcerpts,
+  blockedRecordExcerpts,
+  type BodyTextView,
   evidenceViews,
+  isSourceInvalidReason,
   matchExcerpt,
   normalizeDraftInput,
   presentationJson,
+  sanitizedDraftEvidenceViews,
+  sanitizedRecordEvidenceViews,
+  scrubBodyJson,
+  scrubDraftBody,
+  scrubSourceFragment,
   sha256,
 } from './content'
 import type {
@@ -22,6 +31,7 @@ import type {
   EvidenceInput,
   EvidenceRecord,
   PresentationRef,
+  RecordDetail,
   ReflectionContext,
   ReflectionError,
   ReflectionResult,
@@ -34,6 +44,7 @@ import {
   REFLECTION_CONFIRMATION_DECISIONS,
   reflectionBodyRef,
   reflectionDraftRef,
+  reflectionRecordRef,
 } from './values'
 
 export interface ReflectionServiceOptions {
@@ -115,77 +126,120 @@ export class ReflectionService {
   }
 
   private async search(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'search' }>): Promise<ReflectionResult> {
+    const query = request.query ? normalizeQuery(request.query) : undefined
+    // 正式记录：experience 只返回 active + evidenceStatus=valid（失效即退出主动使用）；
+    // management 返回全部状态（待复核结论仍可查看）。匹配/摘要前先按封锁摘录清理正文，
+    // 失效来源文字不能通过标题或命中与否泄露（父规格 I4）。
+    const records = await this.store.listRecords(context.ownerId, { purpose: request.purpose, limit: 50 })
+    const matchedRecords = records
+      .map((record) => {
+        const blocked = blockedRecordExcerpts(record.evidence)
+        return { record, blocked, body: scrubDraftBody(record.body, blocked) }
+      })
+      .filter(({ body }) => matchesBody(body, query, request.category, request.scope))
+
     if (request.purpose === 'experience') {
-      // 本票没有正式记录表：草稿不得冒充经验检索结果（父规格 I3/I6）。
       return success('search', {
         purpose: 'experience',
-        records: [],
-        count: 0,
-      }, '尚无可检索的正式反思记录（正式保存与经验检索归后续票）。')
+        records: matchedRecords.map(({ record, body }) => recordSummary(record, body)),
+        count: matchedRecords.length,
+      }, '经验检索仅含已确认且证据有效的记录；来源失效记录已退出主动使用，可在 management 查看待复核状态。')
     }
+
     const drafts = await this.store.listDrafts(context.ownerId, {
       ...(request.state !== undefined ? { state: request.state } : {}),
       limit: 20,
     })
-    const query = request.query ? normalizeQuery(request.query) : undefined
-    const filtered = drafts.filter((draft) => {
-      if (request.category !== undefined && draft.body.category !== request.category) return false
-      if (request.scope !== undefined && request.scope.length > 0 && !request.scope.some((label) => draft.body.scope.labels.includes(label))) return false
-      if (query && query.words.length > 0) {
-        const haystack = normalizeQueryText([
-          draft.body.title,
-          draft.body.problem,
-          ...draft.body.improvements,
-          draft.body.scope.conditions,
-          draft.body.scope.exclusions,
-          ...draft.body.scope.labels,
-          draft.body.category,
-        ].join('\n'))
-        if (!query.words.every((word) => haystack.includes(word))) return false
-      }
-      return true
-    })
+    const filtered = drafts
+      .map((draft) => {
+        const blocked = blockedDraftExcerpts(draft.evidence)
+        return { draft, blocked, body: scrubDraftBody(draft.body, blocked) }
+      })
+      .filter(({ body }) => matchesBody(body, query, request.category, request.scope))
     return success('search', {
       purpose: 'management',
-      drafts: filtered.map(draftSummary),
-      count: filtered.length,
-    }, '管理视图只返回草稿；未确认草稿不进入经验匹配。')
+      records: matchedRecords.map(({ record, body }) => recordSummary(record, body)),
+      drafts: filtered.map(({ draft, body }) => draftSummary(draft, body)),
+      count: matchedRecords.length + filtered.length,
+    }, '管理视图同时返回草稿与正式记录（含 review_required 待复核）；未确认草稿不进入经验匹配。')
   }
 
   private async read(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'read' }>): Promise<ReflectionResult> {
-    if (request.purpose === 'experience') {
-      return success('read', { purpose: 'experience', drafts: [] }, '尚无正式反思记录；未确认草稿只能以 management 读取。')
-    }
-    const out: unknown[] = []
+    const recordsOut: unknown[] = []
+    const draftsOut: unknown[] = []
     let conflict = false
     for (const target of request.targets) {
+      if ('record_id' in target) {
+        const record = await this.store.getRecord(context.ownerId, target.record_id, target.version)
+        // 不存在与越权同形；experience 下失效/停用记录不交付（即使同 owner）。
+        const unavailable = !record || (request.purpose === 'experience' && (record.status !== 'active' || record.evidenceStatus !== 'valid'))
+        if (unavailable) {
+          recordsOut.push({ record_id: target.record_id, status: 'not_found' })
+          continue
+        }
+        if (target.version !== undefined && target.version !== (effectiveVersion(record))) {
+          conflict = true
+          recordsOut.push({
+            record_id: record.recordId,
+            status: 'conflict',
+            expected_version: target.version,
+            actual_version: effectiveVersion(record),
+          })
+          continue
+        }
+        // 读门同步封锁：来源失效摘录与正文中逐字复制的来源片段都不返回（等 outbox 清理是纵深）。
+        // 正文只给引用（I7：工具输出/checkpoint 不存完整反思正文），模型边界由解引用临时展开。
+        const blocked = blockedRecordExcerpts(record.evidence)
+        const body = scrubDraftBody(record.body, blocked)
+        recordsOut.push({
+          record_id: record.recordId,
+          version: effectiveVersion(record),
+          status: record.status,
+          evidence_status: record.evidenceStatus,
+          title: body.title,
+          category: body.category,
+          body_ref: reflectionRecordRef(record.recordId, effectiveVersion(record)),
+          evidence: sanitizedRecordEvidenceViews(record.evidence),
+          ...(blocked.length > 0 ? { redacted_fragments: blocked.length } : {}),
+        })
+        continue
+      }
+
       const draft = await this.store.getDraft(context.ownerId, target.draft_id)
-      if (!draft) {
-        out.push({ draft_id: target.draft_id, status: 'not_found' })
+      // 未确认草稿永不进入 experience 匹配/读取（父规格 I3/I6）；按目标顺序逐项返回结果，
+      // 不存在/越权/experience 一律同形 not_found（I6 防探测）。
+      if (!draft || request.purpose === 'experience') {
+        draftsOut.push({ draft_id: target.draft_id, status: 'not_found' })
         continue
       }
       if (target.version !== undefined && target.version !== draft.version) {
         conflict = true
-        out.push({ draft_id: draft.id, status: 'conflict', expected_version: target.version, actual_version: draft.version })
+        draftsOut.push({ draft_id: draft.id, status: 'conflict', expected_version: target.version, actual_version: draft.version })
         continue
       }
       // 正文不落工具输出/checkpoint：只给引用，模型调用边界由解引用适配临时展开。
-      out.push({
+      const blocked = blockedDraftExcerpts(draft.evidence)
+      draftsOut.push({
         draft_id: draft.id,
         version: draft.version,
         status: draft.status,
         action: draft.action,
-        title: draft.body.title,
+        title: scrubSourceFragment(draft.body.title, blocked),
         category: draft.body.category,
         body_ref: reflectionDraftRef(draft.id, draft.version),
-        evidence: evidenceViews(draft.evidence).map((e) => ({
+        evidence: sanitizedDraftEvidenceViews(draft.evidence).map((e) => ({
           position: e.position,
           status: e.status,
           ...(e.reason !== undefined ? { reason: e.reason } : {}),
         })),
+        ...(blocked.length > 0 ? { evidence_blocked: true } : {}),
       })
     }
-    const base = success('read', { purpose: 'management', drafts: out })
+    const base = success('read', {
+      purpose: request.purpose,
+      records: recordsOut,
+      drafts: draftsOut,
+    })
     return conflict ? { ...base, outcome: 'partial_success', error: { category: 'conflict', code: 'conflict', message: '部分目标版本已变化' } } : base
   }
 
@@ -331,14 +385,20 @@ export class ReflectionService {
       await this.store.invalidateVersion(context.ownerId, draft.id, draft.version, stale)
       return failure('conflict', 'not_ready', `证据来源已变化（${stale}），请重新起草`, 'present')
     }
-    const bodyJson = presentationJson({ body: draft.body, evidence: draft.evidence, version: draft.version, action: draft.action })
+    // #1084：即使仍有其它 preparing 证据可 preview，也不把已封锁的来源片段写进展示副本。
+    const blocked = blockedDraftExcerpts(draft.evidence)
+    const shownBody = scrubDraftBody(draft.body, blocked)
+    const bodyJson = scrubBodyJson(
+      presentationJson({ body: draft.body, evidence: draft.evidence, version: draft.version, action: draft.action }),
+      blocked,
+    )
     const bodyHash = sha256(bodyJson)
     await this.store.revokePresentations(context.ownerId, draft.id)
     const presentation = await this.store.createPresentation({
       ownerId: context.ownerId,
       sessionId: context.currentSessionId,
       draft,
-      body: draft.body,
+      body: shownBody,
       evidence: draft.evidence,
       bodyJson,
       bodyHash,
@@ -434,8 +494,14 @@ export class ReflectionService {
     if (!p) return null
     const deleted = p.status === 'deleted'
     const draft = deleted ? null : await this.store.getDraft(ownerId, p.draftId)
+    // #1084：来源失效后读门同步封锁——无效摘录换占位、正文中逐字复制的来源片段换占位；
+    // outbox 之后清理持久副本，读门不依赖清理任务完成。展示与草稿证据取并集：两次读之间
+    // 若有并发失效提交，任一侧的封锁态都足以阻止交付（二次复核语义）。
+    const evidenceForGate = draft ? [...p.evidence, ...draft.evidence] : p.evidence
+    const blocked = deleted ? [] : blockedDraftExcerpts(evidenceForGate)
+    const invalidated = !deleted && (blocked.length > 0 || evidenceForGate.some((e) => e.status !== 'valid' && isSourceInvalidReason(e.reason)))
     // confirmable 每次读实时计算（展示 ref 里冻结的值会在 recordTurn 核验后过期）。
-    const confirmable = !deleted && p.messageId !== null &&
+    const confirmable = !deleted && !invalidated && p.messageId !== null &&
       (p.status === 'active' || p.status === 'acked') &&
       draft !== null && draft.version === p.draftVersion && draft.status === 'pending'
     return {
@@ -445,21 +511,27 @@ export class ReflectionService {
       action: p.action,
       bodyHash: p.bodyHash,
       status: p.status,
-      body: deleted ? null : p.body,
+      body: deleted ? null : scrubDraftBody(p.body, blocked),
       categoryLabel: REFLECTION_CATEGORY_LABELS[p.body.category] ?? p.body.category,
-      evidence: deleted ? [] : evidenceViews(p.evidence),
+      evidence: deleted ? [] : sanitizedDraftEvidenceViews(p.evidence),
       messageId: p.messageId,
       createdAt: p.createdAt,
       confirmable,
-      ...(confirmable ? {} : { notConfirmableReason: deleted ? 'deleted' : draft === null || draft.version !== p.draftVersion ? 'version_changed' : draft.status !== 'pending' ? 'evidence_not_ready' : 'not_bound' }),
+      ...(confirmable ? {} : { notConfirmableReason: deleted ? 'deleted' : invalidated ? 'evidence_changed' : draft === null || draft.version !== p.draftVersion ? 'version_changed' : draft.status !== 'pending' ? 'evidence_not_ready' : 'not_bound' }),
       ...(deleted ? { deleted: true } : {}),
+      ...(invalidated ? { invalidated: true } : {}),
     }
   }
 
   // 来源复核（I4）：展示/提交前逐条重读已核验证据的来源，内容版本变化或不可读即失效。
+  // #1084：已被触发器同步封锁（not_ready + source_invalid 原因）的证据同样视为失效——
+  // 不能因为状态已不是 valid 就跳过复核把封锁版本当成可确认。
   private async reverifyEvidence(context: ReflectionContext, draft: DraftRecord): Promise<string | null> {
     for (const e of draft.evidence) {
-      if (e.status !== 'valid') continue
+      if (e.status !== 'valid') {
+        if (isSourceInvalidReason(e.reason)) return e.reason ?? 'source_changed'
+        continue
+      }
       if (e.messageId === null) return 'in_flight_unbound'
       const source = await this.evidence.readRegion(context, e.sessionId, e.messageId, e.region, e.toolCallId ?? undefined)
       if (!source || !source.regionPresent) return 'source_unavailable'
@@ -604,12 +676,30 @@ export class ReflectionService {
     return formatDraftBody(display.body, display.evidence, display.version)
   }
 
+  /** 模型输入解引用：正式记录正文引用临时展开（#1084；读门已按失效摘录清理）。 */
+  async recordBodyText(ownerId: string, recordId: string, version: number): Promise<string | null> {
+    const record = await this.store.getRecord(ownerId, recordId, version)
+    if (!record) return null
+    if (record.status === 'deleted' || record.evidenceStatus === 'invalid') return null
+    const blocked = blockedRecordExcerpts(record.evidence)
+    return formatDraftBody(
+      scrubDraftBody(record.body, blocked),
+      sanitizedRecordEvidenceViews(record.evidence),
+      version,
+    )
+  }
+
   /** 模型输入解引用：management read 的草稿正文引用临时展开（版本须仍匹配）。 */
   async draftBodyText(ownerId: string, draftId: string, version: number): Promise<string | null> {
     const draft = await this.store.getDraft(ownerId, draftId)
     if (!draft || draft.version !== version) return null
     if (draft.status === 'cancelled' || draft.status === 'committed') return null
-    return formatDraftBody(draft.body, evidenceViews(draft.evidence), draft.version)
+    const blocked = blockedDraftExcerpts(draft.evidence)
+    return formatDraftBody(
+      scrubDraftBody(draft.body, blocked),
+      sanitizedDraftEvidenceViews(draft.evidence),
+      draft.version,
+    )
   }
 }
 
@@ -628,6 +718,8 @@ export interface PresentationDisplay {
   readonly confirmable: boolean
   readonly notConfirmableReason?: string
   readonly deleted?: boolean
+  /** #1084：来源变化/删除/失权导致证据失效——读门已封锁摘录，需重新起草/复核。 */
+  readonly invalidated?: boolean
 }
 
 export type AckResult = { seq: number; ackedAt: string } | { error: 'not_found' | 'conflict' | 'not_ready' }
@@ -659,15 +751,54 @@ function pendingRecord(p: {
   }
 }
 
-function draftSummary(draft: DraftRecord): Record<string, unknown> {
+function effectiveVersion(record: RecordDetail): number {
+  return record.revision?.version ?? record.currentRevision
+}
+
+function draftSummary(draft: DraftRecord, body: DraftBody): Record<string, unknown> {
   return {
     draft_id: draft.id,
     version: draft.version,
     status: draft.status,
-    title: draft.body.title,
+    title: body.title,
     category: draft.body.category,
     updated_at: draft.updatedAt,
   }
+}
+
+function recordSummary(record: RecordDetail, body: DraftBody): Record<string, unknown> {
+  return {
+    record_id: record.recordId,
+    version: effectiveVersion(record),
+    status: record.status,
+    evidence_status: record.evidenceStatus,
+    title: body.title,
+    category: record.category,
+    updated_at: record.updatedAt,
+  }
+}
+
+function matchesBody(
+  body: DraftBody,
+  query: { words: string[] } | undefined,
+  category: string | undefined,
+  scope: readonly string[] | undefined,
+): boolean {
+  if (category !== undefined && body.category !== category) return false
+  if (scope !== undefined && scope.length > 0 && !scope.some((label) => body.scope.labels.includes(label))) return false
+  if (query && query.words.length > 0) {
+    const haystack = normalizeQueryText([
+      body.title,
+      body.problem,
+      ...body.improvements,
+      body.scope.conditions,
+      body.scope.exclusions,
+      ...body.scope.labels,
+      body.category,
+    ].join('\n'))
+    if (!query.words.every((word) => haystack.includes(word))) return false
+  }
+  return true
 }
 
 const NON_CONFIRM_EFFECTS: Record<
@@ -727,7 +858,7 @@ function normalizeQueryText(text: string): string {
   return text.normalize('NFKC').toLowerCase()
 }
 
-export function formatDraftBody(body: DraftBody, evidence: ReturnType<typeof evidenceViews>, version: number): string {  const lines = [
+export function formatDraftBody(body: DraftBody, evidence: readonly BodyTextView[], version: number): string {  const lines = [
     `【反思草稿 v${version}】${body.title}`,
     `类别：${body.category}`,
     `一、问题与影响\n${body.problem}`,

@@ -71,10 +71,16 @@ export const ReflectionSearchSchema = z.object({
   }
 })
 
+const readTarget = z.union([
+  z.object({ draft_id: id, version: z.number().int().min(1).optional() }).strict(),
+  // #1084（RF-T08）：正式记录管理读取（待复核结论与有效来源仍可查看）。
+  z.object({ record_id: id, version: z.number().int().min(1).optional() }).strict(),
+])
+
 export const ReflectionReadSchema = z.object({
   operation: z.literal('read'),
   purpose: z.enum(['experience', 'management']).default('experience'),
-  targets: z.array(z.object({ draft_id: id, version: z.number().int().min(1).optional() }).strict()).min(1).max(5),
+  targets: z.array(readTarget).min(1).max(5),
 }).strict()
 
 export const ReflectionDraftSchema = z.object({

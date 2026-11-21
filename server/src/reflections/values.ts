@@ -38,9 +38,27 @@ export const REFLECTION_DRAFT_STATUSES = [
 ] as const
 export type ReflectionDraftStatus = (typeof REFLECTION_DRAFT_STATUSES)[number]
 
-// 证据状态：preparing（在飞待落行）| valid（服务端已核验）| not_ready（截断外/摘要/未解析）。
+// 证据状态：preparing（在飞待落行）| valid（服务端已核验）| not_ready（截断外/摘要/未解析/
+// 来源变化或删除）。#1084：来源失效原因进入 not_ready，读门据此封锁摘录。
 export const REFLECTION_EVIDENCE_STATUSES = ['preparing', 'valid', 'not_ready'] as const
 export type ReflectionEvidenceStatus = (typeof REFLECTION_EVIDENCE_STATUSES)[number]
+
+// #1084（RF-T08）：来源失效原因——业务写入/读门与 prisma/reflection-triggers.sql 中的
+// 字面值保持同步（触发器 SQL 无法引用 TS 常量，改动须两处一致）。这些原因的证据摘录与
+// 正文中逐字复制的来源片段都不得再交付（读门同步封锁，outbox 负责物理清理）。
+export const REFLECTION_SOURCE_INVALID_REASONS = [
+  'source_changed',
+  'source_deleted',
+  'source_unavailable',
+] as const
+export type ReflectionSourceInvalidReason = (typeof REFLECTION_SOURCE_INVALID_REASONS)[number]
+
+export const REFLECTION_INVALID_EXCERPT_PLACEHOLDER = '[来源已失效，待复核]'
+export const REFLECTION_INVALID_FRAGMENT_PLACEHOLDER = '[来源已失效]'
+
+// #1084：来源失效清理器的启动/周期参数（父规格：TTL/清理每分钟）。
+export const REFLECTION_CLEANUP_INTERVAL_MS = 60_000
+export const REFLECTION_CLEANUP_BATCH_SIZE = 50
 
 // 展示状态（父规格 I5/I7）：active 待 ack | acked 已完整渲染 | revoked 被新版本替代 |
 // expired 过窗 | deleted 专属正文已清理（只留占位）。
@@ -81,6 +99,10 @@ export const REFLECTION_BODY_REF_RE = /reflection_display:([A-Za-z0-9_-]{6,64})/
 export const REFLECTION_DRAFT_REF_PREFIX = 'reflection_draft:'
 export const reflectionDraftRef = (draftId: string, version: number): string => `${REFLECTION_DRAFT_REF_PREFIX}${draftId}:${version}`
 export const REFLECTION_DRAFT_REF_RE = /reflection_draft:([A-Za-z0-9_-]{6,64}):(\d{1,9})/g
+// 正式记录正文引用（#1084 management/experience read）：工具输出不落完整正文，边界处临时展开。
+export const REFLECTION_RECORD_REF_PREFIX = 'reflection_record:'
+export const reflectionRecordRef = (recordId: string, version: number): string => `${REFLECTION_RECORD_REF_PREFIX}${recordId}:${version}`
+export const REFLECTION_RECORD_REF_RE = /reflection_record:([A-Za-z0-9_-]{6,64}):(\d{1,9})/g
 
 // 常见凭证/token 形态（父规格 I7：疑似敏感不入正文；未知秘密不宣称 100% 识别）。
 export const SENSITIVE_PATTERNS: readonly RegExp[] = [

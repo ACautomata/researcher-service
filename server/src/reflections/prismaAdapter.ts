@@ -19,6 +19,7 @@ import type {
   ReflectionEvidencePort,
   ReflectionStore,
   ReflectionTriggerMessage,
+  RecordDetail,
 } from './model'
 import type { ReflectionDraftStatus, ReflectionPresentationStatus, ReflectionRegion } from './values'
 
@@ -214,9 +215,17 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
   }
 
   async getDraft(ownerId: string, draftId: string): Promise<DraftRecord | null> {
-    const row = await this.prisma.reflectionDraft.findFirst({ where: { id: draftId, ownerId } })
-    if (!row) return null
-    return draftOf(row, await this.evidenceRows(row.id, row.version))
+    // 单读事务快照：正文与证据版本必须一致——并发来源失效提交后不交付「旧正文 + 新证据」
+    // 的混合视图（父规格 I4：查询与变更并发时二次复核不交付已封锁正文）。
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.reflectionDraft.findFirst({ where: { id: draftId, ownerId } })
+      if (!row) return null
+      const evidence = await tx.reflectionEvidence.findMany({
+        where: { draftId: row.id, draftVersion: row.version },
+        orderBy: { position: 'asc' },
+      })
+      return draftOf(row, evidence)
+    })
   }
 
   async reviseDraft(p: {
@@ -285,12 +294,22 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
   }
 
   async listDrafts(ownerId: string, options: { state?: ReflectionDraftStatus; limit: number }): Promise<DraftRecord[]> {
-    const rows = await this.prisma.reflectionDraft.findMany({
-      where: { ownerId, ...(options.state !== undefined ? { status: options.state } : {}) },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
-      take: options.limit,
+    // #1084：管理检索需要在交付前按失效摘录清理标题/正文，故连当前版本证据一起读快照。
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.reflectionDraft.findMany({
+        where: { ownerId, ...(options.state !== undefined ? { status: options.state } : {}) },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+        take: options.limit,
+      })
+      const out: DraftRecord[] = []
+      for (const row of rows) {
+        out.push(draftOf(row, await tx.reflectionEvidence.findMany({
+          where: { draftId: row.id, draftVersion: row.version },
+          orderBy: { position: 'asc' },
+        })))
+      }
+      return out
     })
-    return rows.map((row) => draftOf(row, []))
   }
 
   // ---- 展示 ----
@@ -778,6 +797,26 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
             evidenceJson: JSON.stringify(evidence),
           },
         })
+        // #1084（RF-T08）：结构化证据引用独立存储（无会话/消息外键）——源会话删除后仍可
+        // 复核/封锁，不依赖会随会话级联消失的草稿证据行。
+        await tx.reflectionRecordEvidence.createMany({
+          data: evidence.map((e) => ({
+            recordId: record.id,
+            recordVersion: revision,
+            position: e.position,
+            ownerId: p.ownerId,
+            sessionId: e.sessionId,
+            messageId: e.messageId,
+            toolCallId: e.toolCallId,
+            region: e.region,
+            startCp: e.startCp,
+            endCp: e.endCp,
+            excerpt: e.excerpt,
+            regionHash: e.regionHash,
+            contentVersion: e.contentVersion,
+            status: 'valid',
+          })),
+        })
         // 运维事件写失败 → 整笔回滚（不留下无事件的正式结果）。
         if (this.options.failEventWrite?.('record_commit')) throw new Error('injected event write failure')
         await tx.reflectionEvent.create({
@@ -853,6 +892,170 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       where: { ownerId, draftId, status: 'active' },
       data: { status: 'revoked' },
     })
+  }
+
+  // ---- 正式记录管理读取（#1084 · RF-T08）----
+
+  async listRecords(ownerId: string, options: { purpose: 'experience' | 'management'; limit: number }): Promise<RecordDetail[]> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.reflectionRecord.findMany({
+        // experience 仅 active + valid：任一支撑失效即退出主动使用（父规格 I4）。
+        where: {
+          ownerId,
+          ...(options.purpose === 'experience' ? { status: 'active', evidenceStatus: 'valid' } : {}),
+        },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+        take: options.limit,
+      })
+      const out: RecordDetail[] = []
+      for (const row of rows) out.push(await this.recordDetail(tx, row))
+      return out
+    })
+  }
+
+  async getRecord(ownerId: string, recordId: string, version?: number): Promise<RecordDetail | null> {
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.reflectionRecord.findFirst({ where: { id: recordId, ownerId } })
+      if (!row) return null
+      return this.recordDetail(tx, row, version)
+    })
+  }
+
+  private async recordDetail(tx: ReflectionTx, row: {
+    id: string
+    ownerId: string
+    sessionId: string
+    title: string
+    category: string
+    contentJson: string
+    status: string
+    evidenceStatus: string
+    currentRevision: number
+    createdAt: Date
+    updatedAt: Date
+  }, version?: number): Promise<RecordDetail> {
+    const target = version ?? row.currentRevision
+    // 记录正文/版本/证据同一读事务快照（并发失效提交时不混用新旧状态）。
+    const revision = await tx.reflectionRevision.findUnique({
+      where: { recordId_version: { recordId: row.id, version: target } },
+    })
+    const evidenceRows = await tx.reflectionRecordEvidence.findMany({
+      where: { recordId: row.id, recordVersion: revision?.version ?? target },
+      orderBy: { position: 'asc' },
+    })
+    const body = revision ? parseBody(revision.bodyJson) : parseBody(row.contentJson)
+    const evidence = evidenceRows.map((e) => ({
+      position: e.position,
+      sessionId: e.sessionId,
+      messageId: e.messageId,
+      toolCallId: e.toolCallId,
+      region: e.region as ReflectionRegion,
+      startCp: e.startCp,
+      endCp: e.endCp,
+      excerpt: e.excerpt,
+      regionHash: e.regionHash,
+      contentVersion: e.contentVersion,
+      status: e.status as 'valid' | 'invalid',
+      ...(e.reason !== null ? { reason: e.reason } : {}),
+    }))
+    return {
+      recordId: row.id,
+      ownerId: row.ownerId,
+      sessionId: row.sessionId,
+      title: revision ? body.title : row.title,
+      category: revision ? body.category : row.category,
+      body,
+      status: row.status,
+      evidenceStatus: row.evidenceStatus,
+      currentRevision: row.currentRevision,
+      revision: revision ? { version: revision.version, createdAt: revision.createdAt.toISOString() } : null,
+      evidence,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    }
+  }
+
+  /**
+   * #1084（RF-T08）发起会话删除的同事务钩子（SessionService.deleteSession 调用）：
+   * - 该会话引用的已提交记录证据 → invalid + review_required（记录本身独立保留）；
+   * - 未提交草稿（含 confirmed_pending_save）连同授权/展示一并关闭，迟到提交不能复活摘录；
+   * - 先写 outbox 摘录副本再封锁，进程重启后仍能清理派生正文副本。
+   */
+  async clearInitiatingSession(tx: ReflectionTx, p: { ownerId: string; sessionId: string }): Promise<void> {
+    const now = new Date()
+    await tx.$executeRaw`
+      INSERT INTO "reflection_cleanup_outbox"
+        ("id", "ownerId", "sessionId", "messageId", "kind", "excerpt", "state", "attempts", "createdAt", "updatedAt")
+      SELECT lower(hex(randomblob(16))), "ownerId", "sessionId", "messageId", 'source_cleanup', "excerpt", 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      FROM "reflection_evidence"
+      WHERE "ownerId" = ${p.ownerId} AND "sessionId" = ${p.sessionId} AND "status" = 'valid'`
+    await tx.$executeRaw`
+      INSERT INTO "reflection_cleanup_outbox"
+        ("id", "ownerId", "sessionId", "messageId", "kind", "excerpt", "state", "attempts", "createdAt", "updatedAt")
+      SELECT lower(hex(randomblob(16))), "ownerId", "sessionId", "messageId", 'source_cleanup', "excerpt", 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      FROM "reflection_record_evidence"
+      WHERE "ownerId" = ${p.ownerId} AND "sessionId" = ${p.sessionId} AND "status" = 'valid'`
+
+    await tx.reflectionEvidence.updateMany({
+      where: { ownerId: p.ownerId, sessionId: p.sessionId, status: { not: 'not_ready' } },
+      data: { status: 'not_ready', reason: 'source_deleted' },
+    })
+    await tx.reflectionRecordEvidence.updateMany({
+      where: { ownerId: p.ownerId, sessionId: p.sessionId, status: 'valid' },
+      data: { status: 'invalid', reason: 'source_deleted' },
+    })
+    const affectedRecords = await tx.reflectionRecordEvidence.findMany({
+      where: { ownerId: p.ownerId, sessionId: p.sessionId, status: 'invalid' },
+      select: { recordId: true },
+    })
+    const recordIds = [...new Set(affectedRecords.map((r) => r.recordId))]
+    if (recordIds.length > 0) {
+      await tx.reflectionRecord.updateMany({
+        where: { ownerId: p.ownerId, id: { in: recordIds }, evidenceStatus: 'valid' },
+        data: { evidenceStatus: 'review_required' },
+      })
+    }
+
+    const drafts = await tx.reflectionDraft.findMany({
+      where: {
+        ownerId: p.ownerId,
+        sessionId: p.sessionId,
+        status: { in: ['preparing', 'pending', 'confirmed_pending_save'] },
+      },
+      select: { id: true, version: true },
+    })
+    const draftIds = drafts.map((d) => d.id)
+    await tx.reflectionGrant.updateMany({
+      where: {
+        ownerId: p.ownerId,
+        status: 'active',
+        OR: [{ sessionId: p.sessionId }, ...(draftIds.length > 0 ? [{ draftId: { in: draftIds } }] : [])],
+      },
+      data: { status: 'revoked' },
+    })
+    if (draftIds.length > 0) {
+      await tx.reflectionEvidence.updateMany({
+        where: { ownerId: p.ownerId, draftId: { in: draftIds } },
+        data: { status: 'not_ready', reason: 'source_deleted' },
+      })
+      await tx.reflectionPresentation.updateMany({
+        where: { ownerId: p.ownerId, draftId: { in: draftIds } },
+        data: { status: 'deleted', bodyJson: '{}', revokedAt: now },
+      })
+      await tx.reflectionDraft.updateMany({
+        where: { ownerId: p.ownerId, id: { in: draftIds } },
+        data: { status: 'cancelled', closedAt: now, contentJson: '{}', title: '' },
+      })
+      await tx.reflectionEvent.createMany({
+        data: drafts.map((d) => ({
+          ownerId: p.ownerId,
+          objectId: d.id,
+          action: 'draft_cancel',
+          version: d.version,
+          result: 'ok',
+        })),
+      })
+    }
   }
 }
 

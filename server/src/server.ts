@@ -16,6 +16,7 @@ import { WikiUpdateRunService } from './wiki/updateRun'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
 import { createReflectionsRuntime } from './reflections/runtime'
+import { ReflectionCleanupService } from './reflections/cleanup'
 import { AttachmentsService } from './attachments/service'
 import { SkillMarketService } from './skills/service'
 import { ATTACHMENT_TMP_DIR } from './attachments/values'
@@ -55,6 +56,8 @@ async function main(): Promise<void> {
   // #1080 RF-T04：reflections 草稿链路（展示读取/ack 窄协议挂载）。工具本体仍为内部接缝——
   // 不注入 runner deps.reflections，生产两个新工具继续等待完整门禁。
   const reflections = createReflectionsRuntime(prisma)
+  // #1084（RF-T08）：来源失效清理 outbox——启动即重放，周期扫描；关闭时等待短事务收尾。
+  const reflectionsCleanup = new ReflectionCleanupService(prisma)
   const chaoxingOptions = readChaoxingOptions()
   const chaoxingRemote = !chaoxingOptions ? undefined : chaoxingOptions.transport === 'mcp'
     ? createChaoxingRemote(chaoxingOptions, mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}')))
@@ -112,6 +115,10 @@ async function main(): Promise<void> {
       rewindFilesCore: (p) => runner.fileJournal.rewindFilesCore(p),
       runRewindExclusive: (sessionId, fn) => runner.fileJournal.runRewindExclusive(sessionId, fn),
       preview: (p) => runner.fileJournal.preview(p),
+    },
+    // #1084（RF-T08）：删会话同事务关闭未提交草稿/撤授权并封锁该会话来源证据。
+    reflections: {
+      clearInitiatingSession: (tx, p) => reflections.store.clearInitiatingSession(tx, p),
     },
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))
@@ -184,6 +191,7 @@ async function main(): Promise<void> {
   // 优雅关闭：runner 队列 drain（在飞 run 完成或 job failed——run 执行错误已在 RunService
   // 消化为终态事件）；沙箱/wiki 容器生命周期无后台队列（#858 起 fleet BullMQ 队列退役）。
   const shutdown = async (): Promise<void> => {
+    await reflectionsCleanup.stop().catch(() => {})
     await sandboxes.close().catch(() => {})
     await wikiContainers.close().catch(() => {})
     await runner.close().catch(() => {})
@@ -193,6 +201,8 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => void shutdown())
 
   server.listen(config.port, () => {
+    // #1084：清理器随服务启动（启动即扫，重启不遗漏 outbox）。
+    reflectionsCleanup.start()
     // eslint-disable-next-line no-console
     console.log(`[server] 控制面 listening on :${config.port}`)
   })

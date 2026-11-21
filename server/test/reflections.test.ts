@@ -260,7 +260,7 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
     expect(experience.outcome).toBe('success')
     expect(experience.records).toEqual([])
     const readExperience = await runtime.service.execute(leader(), { operation: 'read', purpose: 'experience', targets: [{ draft_id: 'whatever' }] })
-    expect(readExperience.drafts).toEqual([])
+    expect(readExperience.drafts).toEqual([{ draft_id: 'whatever', status: 'not_found' }])
   })
 
   it('取消：关闭未提交草稿并清理证据/展示', async () => {

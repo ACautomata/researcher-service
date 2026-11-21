@@ -72,7 +72,8 @@
   （逆放摘要 + 锚后 exec 跨越清单——POST 同 body，只读）；
   50002 同码防探测）。
 - `/api/v1/reflections/displays/<displayId>` — 反思展示窄协议（#1080 RF-T04）：GET 读取完整五部分
-  展示正文（聊天结构化块渲染源；草稿/正式记录操作仍只经 Leader 工具，无记录 CRUD）；POST
+  展示正文（聊天结构化块渲染源；草稿/正式记录操作仍只经 Leader 工具，无记录 CRUD；#1084 来源
+  失效后 `invalidated=true` 且摘录/正文副本已换占位）；POST
   `/<displayId>/ack` 浏览器完整渲染后回执 `{version, hash, messageId}`（`reflectionAckSchema`；
   仅证明客户端已呈现版本，不是写授权）。50009 展示不存在/越权同码防探测；50010 未绑定终态消息
   或证据未核验；50011 版本/hash/消息引用冲突；90002 校验失败。

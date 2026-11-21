@@ -72,6 +72,7 @@ const evidencePending = computed(() => (display.value?.evidence ?? []).filter((e
       <span class="rf-action">{{ operationLabel }}</span>
       <span v-if="notConfirmable" class="rf-badge pending" data-test="reflection-not-confirmable">证据未核验，暂不可确认</span>
       <span v-else class="rf-badge ready">可在下方对话中确认保存</span>
+      <span v-if="display?.invalidated" class="rf-badge invalidated" data-test="reflection-invalidated">来源已失效，待复核</span>
       <span v-if="display && display.status === 'revoked'" class="rf-badge revoked" data-test="reflection-revoked">已被新版本替代</span>
     </header>
 
@@ -134,6 +135,7 @@ const evidencePending = computed(() => (display.value?.evidence ?? []).filter((e
 .rf-badge.pending { background: var(--el-color-warning-light-9); color: var(--el-color-warning); }
 .rf-badge.ready { background: var(--el-color-success-light-9); color: var(--el-color-success); }
 .rf-badge.revoked { background: var(--el-fill-color); color: var(--el-text-color-secondary); }
+.rf-badge.invalidated { background: var(--el-color-danger-light-9); color: var(--el-color-danger); }
 .rf-body { margin-top: 8px; font-size: 13.5px; line-height: 1.6; }
 .rf-body-title { margin: 0 0 4px; font-size: 15px; }
 .rf-category { margin: 0 0 8px; color: var(--el-text-color-secondary); }
