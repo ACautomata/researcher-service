@@ -422,9 +422,9 @@ export class RunService {
   }
 
   // 停清扫定时器（装配层 close 调用；幂等）
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.nextStepSuggestions.dispose()
-    this.deps.history?.dispose?.()
+    await this.deps.history?.dispose?.()
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer)
       this.sweepTimer = undefined
@@ -913,20 +913,19 @@ export class RunService {
     // #1080 RF-T04：reflections 仅主 Leader 图装配（teammate / 子线程 / 系统命令不接）。
     let reflectionsLeader = this.deps.reflections !== undefined &&
       !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId
-    // #1081 RF-T05 · 基础 RF19：resume/recover 命令不带 triggerMessageId，从持久会话恢复稳定主请求
-    // 身份——interrupted/suspended 期间新主请求被拒，最新用户消息即原触发消息；恢复不新建身份。
-    let reflectionTriggerMessageId = cmd.triggerMessageId
-    if (
-      reflectionsLeader &&
-      reflectionTriggerMessageId === undefined &&
-      (cmd.kind === 'resume' || cmd.kind === 'recover')
-    ) {
-      const lastUser = await this.deps.prisma.sessionMessage.findFirst({
-        where: { sessionId: cmd.sessionId, role: 'user', archivedAt: null },
-        orderBy: { turn: 'desc' },
-        select: { id: true },
-      })
-      reflectionTriggerMessageId = lastUser?.id
+    // #1087：稳定身份由持久账本恢复，不从最新用户消息猜测，不重新发放额度。
+    let reflectionTriggerMessageId: string | undefined
+    if (reflectionsLeader) {
+      try {
+        if (cmd.kind === 'resume' || cmd.kind === 'recover') {
+          const original = [...channelMessages(await this.latestTuple(cmd.sessionId))].reverse().find(HumanMessage.isInstance)
+          if (original?.id) resumeOfRunId = original.id
+        }
+        reflectionTriggerMessageId = this.deps.reflections?.resolveRunRequest
+          ? await this.deps.reflections.resolveRunRequest({ kind: cmd.kind, runId: cmd.runId, ownerId: session.ownerId, sessionId: cmd.sessionId,
+              ...(cmd.triggerMessageId ? { triggerMessageId: cmd.triggerMessageId } : {}), ...(resumeOfRunId ? { resumeOfRunId } : {}) })
+          : cmd.triggerMessageId
+      } catch { console.warn('[runner] reflection identity unavailable') }
     }
     // #1082：记录检索额度绑定稳定主请求；无法解析身份即关闭记录增强，不重新发放额度。
     if (reflectionsLeader && this.deps.reflections?.requiresRequestIdentity && reflectionTriggerMessageId === undefined) {
@@ -1374,6 +1373,7 @@ export class RunService {
               authorizedDrafts: new Set<string>(),
             }
           : undefined
+        if (reflectionFrameLocal && this.deps.reflections?.requiresRequestIdentity && !reflectionTriggerMessageId) Object.assign(reflectionFrameLocal.context, { enhancementUnavailable: true })
         if (reflectionFrameLocal) {
           try {
             const analysisCompleted = await this.deps.reflections!.analysisCompleted(reflectionFrameLocal.context)

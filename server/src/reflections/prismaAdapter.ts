@@ -644,6 +644,31 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     return row ?? null
   }
 
+  async recoveryReady(): Promise<boolean> {
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<{ locked: number }[]>("SELECT locked FROM reflection_recovery_state WHERE id = 'singleton'")
+      return rows.length === 1 && rows[0]!.locked === 0
+    } catch { return false }
+  }
+
+  async claimConfirmation(context: import('./model').ReflectionContext): Promise<boolean> {
+    if (!context.triggerMessageId) return false
+    const key = `confirmation:${context.ownerId}:${context.triggerMessageId}`
+    // 唯一事件占位在分类前落盘；崩溃后只允许停止增强，不重新批准。
+    const changed = await this.prisma.$executeRaw`INSERT OR IGNORE INTO reflection_confirmation_attempts (id, ownerId, sessionId, messageId) VALUES (${key}, ${context.ownerId}, ${context.currentSessionId}, ${context.triggerMessageId})`
+    return changed === 1
+  }
+
+  async recoverConfirmation(context: import('./model').ReflectionContext, now: Date): Promise<import('./model').ConfirmationTurnOutcome> {
+    const grant = await this.prisma.reflectionGrant.findFirst({ where: {
+      ownerId: context.ownerId, sessionId: context.currentSessionId, confirmationMessageId: context.triggerMessageId,
+    } })
+    if (grant && (grant.status === 'consumed' || (grant.status === 'active' && grant.expiresAt > now))) {
+      return { status: 'granted', grantId: grant.id, displayId: grant.displayId, draftId: grant.draftId, version: grant.draftVersion }
+    }
+    return { status: 'skipped', reason: 'confirmation_already_attempted' }
+  }
+
   async confirmationCandidates(ownerId: string, sessionId: string, beforeTurn: number): Promise<ConfirmationCandidate[]> {
     const rows = await this.prisma.reflectionPresentation.findMany({
       where: { ownerId, sessionId, status: 'acked', messageId: { not: null } },

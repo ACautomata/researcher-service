@@ -104,6 +104,8 @@ function success(operation: string, payload: Record<string, unknown>, guidance?:
 const DRAFT_GUIDANCE = '草稿已生成。展示步骤（present）会把完整五部分与实际拟保存版本交给用户；只有用户之后的自然语言确认才能保存。证据 preparing/not_ready 时不可确认。'
 
 export class ReflectionService {
+  private readonly inFlight = new Set<Promise<unknown>>()
+  private readonly shutdownController = new AbortController()
   private readonly clock: () => number
   private readonly cursors: ReflectionCursorStore
   private readonly sweepTimer?: ReturnType<typeof setInterval>
@@ -127,18 +129,32 @@ export class ReflectionService {
     }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    this.shutdownController.abort()
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.cursors.clear()
-    this.options.query?.dispose?.()
+    await this.options.query?.dispose?.()
+    await Promise.allSettled([...this.inFlight])
   }
 
-  async execute(context: ReflectionContext, input: unknown, signal?: AbortSignal): Promise<ReflectionResult> {
+  execute(context: ReflectionContext, input: unknown, signal?: AbortSignal): Promise<ReflectionResult> {
+    return this.track(this.executeInner(context, input, signal))
+  }
+
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.inFlight.add(operation)
+    void operation.then(() => this.inFlight.delete(operation), () => this.inFlight.delete(operation))
+    return operation
+  }
+
+  private async executeInner(context: ReflectionContext, input: unknown, signal?: AbortSignal): Promise<ReflectionResult> {
+    signal = signal ? AbortSignal.any([signal, this.shutdownController.signal]) : this.shutdownController.signal
     const started = this.clock()
     const parsed = ReflectionRecordsSchema.safeParse(input)
     const operation = parsed.success ? parsed.data.operation : 'unknown'
     let result: ReflectionResult
     if (context.role !== 'leader') result = failure('permission', 'leader_only', '反思记录仅供 Leader 使用', operation)
+    else if (!await this.store.recoveryReady()) result = failure('system', 'system_error', '反思恢复安全日志未核验，已停止增强，原任务可继续', operation)
     else if (context.enhancementUnavailable) result = failure('system', 'system_error', '反思元数据不可恢复，本请求已停止增强，原任务可继续', operation)
     else if (!parsed.success) result = failure('parameter', 'invalid_parameters', '反思工具参数无效', operation)
     else if (signal?.aborted) result = failure('limit', 'cancelled', '反思操作已取消', operation)
@@ -168,7 +184,7 @@ export class ReflectionService {
         durationMs: Math.max(0, this.clock() - started),
       })
     } catch {
-      // 访问日志故障不阻断已授权操作，也不输出正文。
+      console.warn('[reflections] access log failed')
     }
     return result
   }
@@ -1133,6 +1149,7 @@ export class ReflectionService {
   // ---- 展示读取 / ack（窄协议端点；ack 仅证明客户端已呈现版本，不是写授权）----
 
   async getDisplay(ownerId: string, displayId: string): Promise<PresentationDisplay | null> {
+    if (this.shutdownController.signal.aborted || !await this.store.recoveryReady()) return null
     const p = await this.store.getPresentation(ownerId, displayId)
     if (!p) return null
     const deleted = p.status === 'deleted'
@@ -1183,7 +1200,13 @@ export class ReflectionService {
     return null
   }
 
-  async ackDisplay(ownerId: string, displayId: string, input: { version: number; hash: string; messageId: string }): Promise<AckResult> {
+  ackDisplay(ownerId: string, displayId: string, input: { version: number; hash: string; messageId: string }): Promise<AckResult> {
+    return this.track(this.ackDisplayInner(ownerId, displayId, input))
+  }
+
+  private async ackDisplayInner(ownerId: string, displayId: string, input: { version: number; hash: string; messageId: string }): Promise<AckResult> {
+    if (this.shutdownController.signal.aborted) return { error: 'not_ready' }
+    if (!await this.store.recoveryReady()) return { error: 'not_ready' }
     return this.store.ackPresentation({
       ownerId,
       displayId,
@@ -1197,7 +1220,11 @@ export class ReflectionService {
   //
   // 在用户消息入队后、主 Leader 图执行前调用：分类器只读真实确认消息原文与服务端唯一动作快照。
   // 分类结果不等于授权——签发前服务端复核 ack 先后、版本/hash/来源/候选唯一，再短事务 CAS。
-  async confirmTurn(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
+  confirmTurn(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
+    return this.track(this.confirmTurnLogged(context, fallback))
+  }
+
+  private async confirmTurnLogged(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
     const started = this.clock()
     const outcome = await this.confirmTurnInner(context, fallback)
     try {
@@ -1217,10 +1244,14 @@ export class ReflectionService {
 
   private async confirmTurnInner(context: ReflectionContext, fallback: ConfirmationClassifier): Promise<ConfirmationTurnOutcome> {
     const skipped = (reason: string): ConfirmationTurnOutcome => ({ status: 'skipped', reason })
+    if (this.shutdownController.signal.aborted) return skipped('service_closed')
+    if (!await this.store.recoveryReady()) return skipped('recovery_locked')
     if (context.role !== 'leader') return skipped('not_leader')
     if (context.triggerMessageId === undefined) return skipped('no_trigger')
     const trigger = await this.store.getTriggerMessage(context.ownerId, context.currentSessionId, context.triggerMessageId)
     if (!trigger) return skipped('trigger_missing')
+    if (!await this.store.claimConfirmation(context)) return this.store.recoverConfirmation(context, new Date(this.clock()))
+
 
     const candidates = await this.store.confirmationCandidates(context.ownerId, context.currentSessionId, trigger.turn)
     // 多候选无明确目标 = 歧义；一条消息只确认一个完整动作。
@@ -1271,6 +1302,8 @@ export class ReflectionService {
       await this.store.invalidateVersion(context.ownerId, candidate.draft.id, candidate.draft.version, stale)
       return skipped('evidence_changed')
     }
+    if (this.shutdownController.signal.aborted) return skipped('service_closed')
+    if (!await this.store.recoveryReady()) return skipped('recovery_locked')
     const ttl = this.options.grantTtlMs ?? DEFAULT_GRANT_TTL_MS
     const grant = await this.store.issueGrant({
       ownerId: context.ownerId,
@@ -1300,7 +1333,7 @@ export class ReflectionService {
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const result = await withTimeout(
-          classifier(input, AbortSignal.timeout(timeoutMs)),
+          classifier(input, AbortSignal.any([AbortSignal.timeout(timeoutMs), this.shutdownController.signal])),
           timeoutMs,
         )
         if (REFLECTION_CONFIRMATION_DECISIONS.includes(result.decision)) return result
@@ -1321,6 +1354,7 @@ export class ReflectionService {
 
   /** 模型输入解引用：management read 的草稿正文引用临时展开（版本须仍匹配）。 */
   async draftBodyText(ownerId: string, draftId: string, version: number): Promise<string | null> {
+    if (this.shutdownController.signal.aborted || !await this.store.recoveryReady()) return null
     const draft = await this.store.getDraft(ownerId, draftId)
     if (!draft || draft.version !== version) return null
     if (!['pending', 'preparing', 'confirmed_pending_save'].includes(draft.status)) return null
@@ -1338,6 +1372,7 @@ export class ReflectionService {
    * 字符串 ownerId 形式供内部验证调用（无主请求身份，不计量）。
    */
   async recordBodyText(contextOrOwner: ReflectionContext | string, recordId: string, version: number): Promise<string | null> {
+    if (this.shutdownController.signal.aborted || !await this.store.recoveryReady()) return null
     const context: ReflectionContext = typeof contextOrOwner === 'string'
       ? { ownerId: contextOrOwner, currentSessionId: '', role: 'leader' }
       : contextOrOwner

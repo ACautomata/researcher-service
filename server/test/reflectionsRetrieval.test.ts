@@ -12,6 +12,7 @@ import Database from 'better-sqlite3'
 import { createPrismaClient } from '../src/prisma'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { createReflectionsRuntime, type ReflectionsRuntime } from '../src/reflections/runtime'
+import { ProcessReflectionQuery } from '../src/reflections/query'
 import { sha256 } from '../src/reflections/content'
 import type { ReflectionContext } from '../src/reflections/model'
 import { seedUser } from './helpers'
@@ -72,6 +73,28 @@ describe('#1082 reflections 记录检索（真实 SQLite + 真实只读执行器
     role: 'leader',
     requestId: 'req-1082',
     ...extra,
+  })
+
+  it('#1087 取消后立即关闭仍等待待退出子进程，关闭后的业务口停止增强', async () => {
+    const query = new ProcessReflectionQuery({ dbPath })
+    const isolated = createReflectionsRuntime(prisma, { query, dbPath })
+    const controller = new AbortController()
+    const busy = query.probeBusy(60_000, { cooperativeMs: 60_000, hardMs: 60_000, signal: controller.signal })
+    const rejected = expect(busy).rejects.toThrow()
+    controller.abort()
+    await isolated.dispose()
+    await rejected
+    expect((await isolated.service.execute(leader(), { operation: 'search' })).error?.code).toBe('cancelled')
+    expect(query.lease(ownerId)).toBeUndefined()
+  })
+
+  it('#1087 关闭等待真实查询进程退出，拒绝后续槽申请', async () => {
+    const query = new ProcessReflectionQuery({ dbPath })
+    const running = query.probeBusy(60_000, { cooperativeMs: 60_000, hardMs: 60_000 })
+    const rejected = expect(running).rejects.toThrow('unavailable')
+    await query.dispose()
+    await rejected
+    expect(query.lease(ownerId)).toBeUndefined()
   })
 
   let seedSeq = 0

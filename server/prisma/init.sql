@@ -578,6 +578,7 @@ CREATE TABLE "reflection_idempotency" (
 
 -- CreateTable
 CREATE TABLE "reflection_request_budgets" (
+    "originRunId" TEXT NOT NULL DEFAULT '',
     "requestId" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "sessionId" TEXT NOT NULL,
@@ -817,3 +818,21 @@ CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ow
 
 -- CreateIndex
 CREATE INDEX "reflection_episodes_ownerId_requestId_idx" ON "reflection_episodes"("ownerId", "requestId");
+
+-- #1087：确认分类前持久占位，不存用户文本。
+CREATE TABLE "reflection_confirmation_attempts" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "ownerId" TEXT NOT NULL,
+  "sessionId" TEXT NOT NULL,
+  "messageId" TEXT NOT NULL
+);
+
+-- 无内容安全日志；独立于90天访问事件保留期，备份链存续期间不清理。
+CREATE TABLE IF NOT EXISTS reflection_recovery_state (
+ id TEXT PRIMARY KEY, lineage TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO reflection_recovery_state(id,lineage,locked) VALUES ('singleton',lower(hex(randomblob(16))),0);
+CREATE TABLE IF NOT EXISTS reflection_safety_journal (
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, ownerId TEXT NOT NULL, kind TEXT NOT NULL,
+ objectId TEXT NOT NULL, state TEXT NOT NULL
+);

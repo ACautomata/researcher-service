@@ -18,6 +18,7 @@ export interface ReflectionsRuntimeOptions extends Omit<ReflectionServiceOptions
 }
 
 export interface ReflectionsPort {
+  resolveRunRequest?: PrismaReflectionBudgetLedger['resolveRunRequest']
   analysisCompleted: PrismaReflectionStore['analysisCompleted']
   completeAnalysis: PrismaReflectionStore['completeAnalysis']
   execute: ReflectionService['execute']
@@ -36,7 +37,7 @@ export interface ReflectionsRuntime {
   readonly port: ReflectionsPort
   /** 测试验证缝：真实只读执行器（未装配时 undefined）。 */
   readonly query?: ReflectionQueryPort
-  dispose(): void
+  dispose(): Promise<void>
 }
 
 export function createReflectionsRuntime(
@@ -47,7 +48,8 @@ export function createReflectionsRuntime(
   const query = options.query ?? (options.dbPath
     ? new ProcessReflectionQuery({ dbPath: options.dbPath, ...options.queryOptions })
     : undefined)
-  const budget = options.budget ?? (query ? new PrismaReflectionBudgetLedger(prisma) : undefined)
+  const ledger = new PrismaReflectionBudgetLedger(prisma)
+  const budget = options.budget ?? (query ? ledger : undefined)
   const store = new PrismaReflectionStore(prisma, { clock: options.clock, ...storeOptions })
   const service = new ReflectionService(store, store, {
     ...options,
@@ -55,6 +57,7 @@ export function createReflectionsRuntime(
     ...(budget ? { budget } : {}),
   })
   const port: ReflectionsPort = {
+    resolveRunRequest: input => ledger.resolveRunRequest(input),
     analysisCompleted: context => store.analysisCompleted(context),
     completeAnalysis: context => store.completeAnalysis(context),
     execute: (context, request, signal) => service.execute(context, request, signal),
@@ -63,7 +66,7 @@ export function createReflectionsRuntime(
     draftBodyText: (ownerId, draftId, version) => service.draftBodyText(ownerId, draftId, version),
     recordBodyText: (context, recordId, version) => service.recordBodyText(context, recordId, version),
     bindInFlightEvidence: (p) => store.bindInFlightEvidence(p),
-    requiresRequestIdentity: budget !== undefined,
+    requiresRequestIdentity: true,
   }
   return { store, service, port, ...(query ? { query } : {}), dispose: () => service.dispose() }
 }
