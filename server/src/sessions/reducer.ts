@@ -15,6 +15,8 @@ import type { SystemCommandResult } from './service'
 import type { RejectionSource } from '../runner/approval/audit'
 // type-only：#959 轮次产物卡片行契约单一声明于 filejournal/turnFiles（聚合映射同址）。
 import type { TurnFileRow } from '../runner/filejournal/turnFiles'
+// type-only：#1080 RF-T04 展示引用（只装 displayId/version/hash，不装反思正文）。
+import type { PresentationRef } from '../reflections/model'
 
 // attachmentsJson v1 的 tools 行（#747 C 节：toolCallId/name/input≤1k/result≤1k/state/durationMs/
 // details?≤4KB + 截断标记）。截断纪律：RunProjector 事件侧已按同常量截（1k/4KB），本归约器
@@ -62,6 +64,10 @@ export interface TurnSnapshot {
   // #961 exec 提示行标记：本轮含 EXEC_TOOLS 调用（payload.hasExec === true 才置位——「有调用」
   // 非「有写入」，D6）；依附 files 块（无卡轮无帧即无标记），恒不落 false。
   readonly hasExec?: boolean
+  // #1080 RF-T04 反思展示引用：TurnSnapshot / 序列化附件 / 投影重放白名单显式扩展。
+  // 只装引用（displayId/draftId/version/bodyHash/status）——完整正文在 reflection_presentations，
+  // 聊天块按引用另行授权读取；不放进工具 details（4KiB 截断面）。
+  readonly presentations?: PresentationRef[]
 }
 
 // RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
@@ -77,6 +83,8 @@ export interface RecordTurnPayload {
    *  不留成功假象）→ failed。由 runService 在终态唯一判定并随载荷携带——锚有无不蕴含完成
    *  （interrupted 轮锚恒非空：终态推进先于 interrupt 判定），status 不得由锚推论。 */
   readonly status: 'success' | 'failed'
+  // #1080：本 run 内 present 成功的展示引用（recordTurn 落 attachmentsJson 并绑定终态行）。
+  readonly presentations?: readonly PresentationRef[]
 }
 
 interface DeltaPayload {
@@ -126,6 +134,7 @@ export function serializeAttachments(snap: Partial<TurnSnapshot> & { command?: S
         }
       : {}),
     ...(snap.command !== undefined ? { command: snap.command } : {}),
+    ...(snap.presentations !== undefined && snap.presentations.length > 0 ? { presentations: snap.presentations } : {}),
   })
 }
 
@@ -138,7 +147,8 @@ export function isEmptyTurnSnapshot(snap: TurnSnapshot): boolean {
     (snap.thinking === undefined || snap.thinking === '') &&
     (snap.tools === undefined || snap.tools.length === 0) &&
     (snap.media === undefined || snap.media.length === 0) &&
-    (snap.files === undefined || snap.files.length === 0)
+    (snap.files === undefined || snap.files.length === 0) &&
+    (snap.presentations === undefined || snap.presentations.length === 0)
   )
 }
 

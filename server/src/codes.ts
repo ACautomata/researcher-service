@@ -76,6 +76,11 @@ export const CODE = {
   RUN_NOT_ABORTABLE: 50006, // 无在飞 run 可中断（abort 目标缺失；#777 aborts 条目仅在飞期存在）
   MESSAGE_KEY_CONFLICT: 50007, // 同幂等 key 已用于不同 content（对齐 figures 70041「同 key 不同输入」稳定冲突锁式）
   FILE_REPLAY_IN_PROGRESS: 50008, // 文件状态重放中（#782 会话写围栏超时——rewind 逆放持有围栏，等待有界报持有者）
+  // #1080 RF-T04 反思展示窄协议（会话/run 域续号）：09 = 展示不存在/越权同码防探测；
+  // 10 = 展示未绑定终态消息或证据未核验（ack/确认前置不满足）；11 = 版本/hash/展示引用冲突。
+  REFLECTION_DISPLAY_NOT_FOUND: 50009,
+  REFLECTION_NOT_READY: 50010,
+  REFLECTION_DISPLAY_CONFLICT: 50011,
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；曾为 figures 幂等中间件特例 data=null（该中间件随 #791 创建端点退役）
@@ -115,6 +120,9 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.RUN_IN_PROGRESS]: 'run 进行中，请等待完成或中断后再发消息',
   [CODE.RUN_NOT_ABORTABLE]: '当前没有进行中的 run 可中断',
   [CODE.MESSAGE_KEY_CONFLICT]: '该 Idempotency-Key 已用于不同内容，请更换 key 重试',
+  [CODE.REFLECTION_DISPLAY_NOT_FOUND]: '反思展示不存在或已失效',
+  [CODE.REFLECTION_NOT_READY]: '反思展示尚未绑定终态消息或证据未核验',
+  [CODE.REFLECTION_DISPLAY_CONFLICT]: '反思展示版本、hash 或消息引用已变化',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',

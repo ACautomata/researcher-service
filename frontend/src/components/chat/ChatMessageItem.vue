@@ -11,6 +11,7 @@ import { toolRowToGroupInput } from '@/chat/toolRender/adapt'
 import { computed, ref } from 'vue'
 import MediaAttachment from './MediaAttachmentHost.vue'
 import TurnFilesCard from './TurnFilesCard.vue'
+import ReflectionBlock from './ReflectionBlock.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
 import TraceFold from '@/components/chat/TraceFold.vue'
@@ -196,6 +197,14 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       <!-- #401：assistant 渲染 markdown（含流式光标），user 保持纯文本 + 光标 -->
       <MarkdownRenderer v-if="msg.role === 'assistant'" :text="msg.text" :streaming="msg.streaming" />
       <template v-else>{{ msg.text }}<span v-if="msg.streaming" class="cursor"></span></template>
+      <!-- #1080 RF-T04：结构化反思块在正文之后、媒体/产物卡之前；按展示引用读取完整正文
+           并回执（不依赖截断工具行）。折叠开合不影响（恒在折叠条外）。 -->
+      <ReflectionBlock
+        v-for="p in (msg.presentations ?? [])"
+        :key="`reflection-${p.displayId}`"
+        :presentation="p"
+        :message-id="msg.id"
+      />
       <div v-if="msg.media.length" class="media-list" data-test="media-list">
         <MediaAttachment v-for="m in msg.media" :key="m.attachmentId" :media="m" :readiness="mediaReadiness" />
       </div>

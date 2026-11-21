@@ -15,8 +15,9 @@
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
 // minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）；17→18 #1037 下一步提示状态（additive）；
 // 18→19 #1046 durable background_execs + #1055 Skill 市场三表（均 additive：background_execs /
-// skill_packages/skill_files/skill_enablements）；
-// 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）。
+// skill_packages/skill_files/skill_enablements）。
+// 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
+// 草稿链路四表（additive）。
 export const SCHEMA_VERSION = 20
 
 export function runIncrementalSchema(db) {
@@ -780,6 +781,90 @@ CREATE UNIQUE INDEX IF NOT EXISTS "skill_packages_name_key" ON "skill_packages"(
 CREATE INDEX IF NOT EXISTS "skill_packages_category_idx" ON "skill_packages"("category");
 CREATE INDEX IF NOT EXISTS "skill_packages_uploaderId_idx" ON "skill_packages"("uploaderId");
 CREATE INDEX IF NOT EXISTS "skill_enablements_skillId_idx" ON "skill_enablements"("skillId");
+`)
+
+  // 19→20 #1080（RF-T04）reflections 草稿链路四表（additive；DDL 镜像 prisma/init.sql）。
+  // 正式 record/revision 表与确认授权归 #1081 起后续票。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "reflection_drafts" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "version" INTEGER NOT NULL DEFAULT 1,
+    "status" TEXT NOT NULL DEFAULT 'preparing',
+    "action" TEXT NOT NULL DEFAULT 'create',
+    "title" TEXT NOT NULL DEFAULT '',
+    "category" TEXT NOT NULL DEFAULT 'other',
+    "contentJson" TEXT NOT NULL DEFAULT '{}',
+    "targetsJson" TEXT,
+    "closedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "reflection_drafts_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_drafts_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_evidence" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "runId" TEXT,
+    "toolCallId" TEXT,
+    "region" TEXT NOT NULL,
+    "startCp" INTEGER,
+    "endCp" INTEGER,
+    "excerpt" TEXT NOT NULL,
+    "regionHash" TEXT,
+    "contentVersion" TEXT,
+    "status" TEXT NOT NULL,
+    "reason" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_evidence_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "reflection_drafts" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_presentations" (
+    "displayId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "action" TEXT NOT NULL,
+    "bodyJson" TEXT NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "messageId" TEXT,
+    "ackSeq" INTEGER,
+    "ackedAt" DATETIME,
+    "revokedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_presentations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_presentations_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_presentations_draftId_fkey" FOREIGN KEY ("draftId") REFERENCES "reflection_drafts" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_events" (
+    "seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "ownerId" TEXT NOT NULL,
+    "objectId" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "version" INTEGER,
+    "result" TEXT NOT NULL,
+    "category" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "reflection_evidence_draftId_draftVersion_position_key" ON "reflection_evidence"("draftId", "draftVersion", "position");
+CREATE INDEX IF NOT EXISTS "reflection_drafts_ownerId_sessionId_idx" ON "reflection_drafts"("ownerId", "sessionId");
+CREATE INDEX IF NOT EXISTS "reflection_drafts_ownerId_status_idx" ON "reflection_drafts"("ownerId", "status");
+CREATE INDEX IF NOT EXISTS "reflection_evidence_ownerId_messageId_idx" ON "reflection_evidence"("ownerId", "messageId");
+CREATE INDEX IF NOT EXISTS "reflection_evidence_runId_idx" ON "reflection_evidence"("runId");
+CREATE INDEX IF NOT EXISTS "reflection_presentations_ownerId_draftId_idx" ON "reflection_presentations"("ownerId", "draftId");
+CREATE INDEX IF NOT EXISTS "reflection_presentations_sessionId_idx" ON "reflection_presentations"("sessionId");
+CREATE INDEX IF NOT EXISTS "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
 `)
 }
 

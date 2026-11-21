@@ -15,6 +15,7 @@ import { assembleRunner } from './runner/assembly'
 import { WikiUpdateRunService } from './wiki/updateRun'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
+import { createReflectionsRuntime } from './reflections/runtime'
 import { AttachmentsService } from './attachments/service'
 import { SkillMarketService } from './skills/service'
 import { ATTACHMENT_TMP_DIR } from './attachments/values'
@@ -51,6 +52,9 @@ async function main(): Promise<void> {
   })
   // #1056 Skill 市场服务（B 票 REST 消费 A 票管线 + 三表；D1 全员直发——权限矩阵在路由注释）。
   const skillsMarket = new SkillMarketService({ prisma })
+  // #1080 RF-T04：reflections 草稿链路（展示读取/ack 窄协议挂载）。工具本体仍为内部接缝——
+  // 不注入 runner deps.reflections，生产两个新工具继续等待完整门禁。
+  const reflections = createReflectionsRuntime(prisma)
   const chaoxingOptions = readChaoxingOptions()
   const chaoxingRemote = !chaoxingOptions ? undefined : chaoxingOptions.transport === 'mcp'
     ? createChaoxingRemote(chaoxingOptions, mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}')))
@@ -171,6 +175,8 @@ async function main(): Promise<void> {
     plugins: pluginsRouter,
     // skills（#1056）：Skill 市场全件（/api/v1/skills）。SkillMarketService 单例注入。
     skills: { service: skillsMarket },
+    // reflections（#1080 RF-T04）：展示读取/ack 窄协议（/api/v1/reflections）。
+    reflections: { service: reflections.service },
   })
 
   const server = createServer(app)

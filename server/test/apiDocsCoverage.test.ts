@@ -34,6 +34,7 @@ const MOUNTS_IN_ORDER = [
   '/api/docs',
   '/api/v1/events',
   '/api/v1/sessions',
+  '/api/v1/reflections',
   '/api/v1/integrations/chaoxing',
   '/api/v1', // attachments（与 sessions 共根，序在 sessions 后——app.ts 注释既定）
   '/api/v1/plugins',
@@ -79,6 +80,7 @@ describe('OpenAPI 覆盖守卫（#761）', () => {
       files: { archive: {} as never },
       events: { hub: {} as never },
       sessions: { service: {} as never },
+      reflections: { service: {} as never },
       attachments: { service: {} as never, tmpRoot: mkdtempSync(`${tmpdir()}/att-coverage-`) },
       plugins: { manifests: [], prisma: {} as never },
     })

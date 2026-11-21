@@ -297,7 +297,7 @@ describe('#1055 A 票三表 parity（fresh vs 增量）', () => {
     dbUp.close()
   })
 
-  it('SCHEMA_VERSION 升至 20 且 upgrade-schema.mjs 幂等收敛（脚本入口）', async () => {
+  it('SCHEMA_VERSION 升至 20（#1079 历史额度账本 + #1080 reflections 四表）且 upgrade-schema.mjs 幂等收敛（脚本入口）', async () => {
     const { SCHEMA_VERSION } = await import('../scripts/lib/incremental-schema.mjs')
     expect(SCHEMA_VERSION).toBe(20)
     const db = new Database(path.join(dir, 'entry.db'))
