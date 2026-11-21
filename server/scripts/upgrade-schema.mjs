@@ -19,6 +19,10 @@ const db = new Database(dbPath)
 try {
   runIncrementalSchema(db)
   db.exec(reflectionTriggersSql)
+  // 旧版本升级接缝允许仅含部分基础表；完整库才安装账号级触发器。
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").get()) {
+    db.exec(readFileSync(path.join(here, '..', 'prisma', 'reflection-owner-trigger.sql'), 'utf8'))
+  }
   db.pragma(`user_version = ${SCHEMA_VERSION}`)
 } finally {
   db.close()

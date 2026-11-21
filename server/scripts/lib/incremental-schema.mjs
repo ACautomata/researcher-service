@@ -809,6 +809,7 @@ CREATE TABLE IF NOT EXISTS "reflection_drafts" (
     "category" TEXT NOT NULL DEFAULT 'other',
     "contentJson" TEXT NOT NULL DEFAULT '{}',
     "targetsJson" TEXT,
+    "committedRecordId" TEXT,
     "closedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
@@ -957,6 +958,10 @@ CREATE INDEX IF NOT EXISTS "reflection_request_budgets_ownerId_sessionId_idx" ON
 `)
 
   // 20→21：v20 库的 reflection_presentations 已存在（旧 CREATE 无 ackTurn）——补列。
+  const draftColumns = db.prepare('PRAGMA table_info("reflection_drafts")').all()
+  if (!draftColumns.some(c => c.name === 'committedRecordId')) {
+    db.exec('ALTER TABLE "reflection_drafts" ADD COLUMN "committedRecordId" TEXT')
+  }
   const presentationColumns = db.prepare(`PRAGMA table_info("reflection_presentations")`).all()
   if (!presentationColumns.some((c) => c.name === 'ackTurn')) {
     db.exec('ALTER TABLE "reflection_presentations" ADD COLUMN "ackTurn" INTEGER')

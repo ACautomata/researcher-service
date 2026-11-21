@@ -48,7 +48,7 @@ export function createReflectionsRuntime(
     ? new ProcessReflectionQuery({ dbPath: options.dbPath, ...options.queryOptions })
     : undefined)
   const budget = options.budget ?? (query ? new PrismaReflectionBudgetLedger(prisma) : undefined)
-  const store = new PrismaReflectionStore(prisma, storeOptions)
+  const store = new PrismaReflectionStore(prisma, { clock: options.clock, ...storeOptions })
   const service = new ReflectionService(store, store, {
     ...options,
     ...(query ? { query } : {}),

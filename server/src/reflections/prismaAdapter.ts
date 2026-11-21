@@ -3,6 +3,9 @@
 // 内层 service 不依赖 Prisma；本适配负责归属过滤、事务、展示绑定与 ack 单调序号
 // （reflection_events AUTOINCREMENT）。草稿正文与正式经验存储分离，草稿绝不进入 experience 检索。
 
+import { ReflectionDraftLimitError } from './lifecycle'
+import { isLifecycleAction } from './lifecycle'
+import { purgeDraftCopies, hardDeleteRecord } from './retention'
 import type { PrismaClient } from '../generated/prisma/client'
 import { parseSavedProduct } from '../sessions/productMessage'
 import { contentVersionOf, matchExcerpt, presentationJson, sha256 } from './content'
@@ -191,6 +194,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       failEventWrite?: (action: string) => boolean
       /** 事务前屏障：验证独立连接与提交的真实交错；不替换 repository 或 SQLite。 */
       beforeCommitTransaction?: () => Promise<void>
+      clock?: () => number
       failEpisodeRead?: () => boolean
     } = {},
   ) {}
@@ -240,10 +244,19 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           return { ...previous, alreadyAnalyzed: true }
         }
       }
+      if ((await this.targetDifferences(tx, p.ownerId, p.targets ?? [])).length) throw new Error('stale reflection targets')
+      const now = new Date(this.options.clock?.() ?? Date.now())
+      const active = await tx.reflectionDraft.count({ where: { ownerId: p.ownerId, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } } })
+      const since = new Date(now.getTime() - 86400000)
+      // 创建事件不随会话删除，关闭/删会话不能重新发放24小时额度。兼容旧草稿无事件的情况。
+      const creations = await tx.reflectionEvent.findMany({ where: { ownerId: p.ownerId, action: 'draft_created', createdAt: { gt: since } }, select: { objectId: true } })
+      const recent = creations.length + await tx.reflectionDraft.count({ where: { ownerId: p.ownerId, createdAt: { gt: since }, id: { notIn: creations.map(e => e.objectId) } } })
+      if (active >= 100 || recent >= 100) throw new ReflectionDraftLimitError()
       const draft = await tx.reflectionDraft.create({
         data: {
           ownerId: p.ownerId,
           sessionId: p.sessionId,
+          createdAt: now,
           version: 1,
           status: p.status,
           action: p.action,
@@ -253,6 +266,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           contentJson: JSON.stringify(p.body),
         },
       })
+      await tx.reflectionEvent.create({ data: { ownerId: p.ownerId, objectId: draft.id, action: 'draft_created', result: 'ok', createdAt: now } })
       await insertEvidenceRows(tx, p.ownerId, draft.id, draft.version, p.evidence)
       if (p.episode) await tx.reflectionEpisode.create({ data: {
         id: p.episode.id, ownerId: p.ownerId, sessionId: p.sessionId, requestId: p.episode.requestId, draftId: draft.id,
@@ -287,7 +301,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     const outcome = await this.prisma.$transaction(async (tx) => {
       const current = await tx.reflectionDraft.findFirst({ where: { id: p.draftId, ownerId: p.ownerId } })
       if (!current || current.version !== p.baseVersion) return null
-      if (current.status === 'committed' || current.status === 'cancelled') return null
+      if (!['pending', 'preparing', 'confirmed_pending_save'].includes(current.status)) return null
       const version = current.version + 1
       const updated = await tx.reflectionDraft.update({
         where: { id: current.id },
@@ -380,7 +394,11 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     bodyHash: string
     action: string
   }): Promise<import('./model').PresentationRecord> {
-    const row = await this.prisma.reflectionPresentation.create({
+    const row = await this.prisma.$transaction(async tx => {
+      const draft = await tx.reflectionDraft.findFirst({ where: { id: p.draft.id, ownerId: p.ownerId, version: p.draft.version, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } } })
+      if (!draft || draft.contentJson !== JSON.stringify(p.draft.body) ||
+          (await this.targetDifferences(tx, p.ownerId, p.draft.targets ?? [])).length) throw new Error('stale reflection display')
+      return tx.reflectionPresentation.create({
       data: {
         ownerId: p.ownerId,
         sessionId: p.sessionId,
@@ -391,6 +409,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         bodyHash: p.bodyHash,
         status: 'active',
       },
+    })
     })
     return {
       displayId: row.displayId,
@@ -416,7 +435,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         data: { status: 'not_ready', reason },
       })
       await tx.reflectionDraft.updateMany({
-        where: { id: draftId, ownerId, version },
+        where: { id: draftId, ownerId, version, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } },
         data: { status: 'preparing' },
       })
     })
@@ -485,13 +504,13 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       }
       for (const draftId of affected) {
         const draft = await this.prisma.reflectionDraft.findFirst({ where: { id: draftId, ownerId: p.ownerId } })
-        if (!draft || draft.status === 'cancelled' || draft.status === 'committed') continue
+        if (!draft || !['preparing', 'pending', 'confirmed_pending_save'].includes(draft.status)) continue
         const versionRows = await this.prisma.reflectionEvidence.findMany({
           where: { draftId, draftVersion: draft.version },
           select: { status: true },
         })
         const status = versionRows.length > 0 && versionRows.every((r) => r.status === 'valid') ? 'pending' : 'preparing'
-        await this.prisma.reflectionDraft.update({ where: { id: draftId }, data: { status } })
+        await this.prisma.reflectionDraft.updateMany({ where: { id: draftId, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } }, data: { status } })
       }
     }
     const displays = [...(p.displayIds ?? [])]
@@ -646,7 +665,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       })
       if (!draftRow) continue
       const evidence = await this.evidenceRows(row.draftId, row.draftVersion)
-      if (evidence.length === 0 || !evidence.every((e) => e.status === 'valid')) continue
+      if (!isLifecycleAction(draftRow.action) && (evidence.length === 0 || !evidence.every((e) => e.status === 'valid'))) continue
       out.push({
         presentation: await this.presentationRecord(row),
         draft: draftOf(draftRow, evidence),
@@ -734,7 +753,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         if (!draft) return null
         if ((await this.targetDifferences(tx, p.ownerId, JSON.parse(draft.targetsJson ?? '[]'))).length) return null
         const evidence = await tx.reflectionEvidence.findMany({ where: { draftId: draft.id, draftVersion: draft.version } })
-        if (!await this.validEvidence(tx, p.ownerId, draft.sessionId, evidenceOf(evidence))) return null
+        if (!isLifecycleAction(draft.action) && !await this.validEvidence(tx, p.ownerId, draft.sessionId, evidenceOf(evidence))) return null
         // CAS：草稿仍 pending 才进入待保存；并发修订/取消整体失败，无部分授权。
         const moved = await tx.reflectionDraft.updateMany({
           where: { id: draft.id, ownerId: p.ownerId, version: draft.version, status: 'pending' },
@@ -859,7 +878,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           where: { draftId: p.draftId, draftVersion: p.draftVersion },
           orderBy: { position: 'asc' },
         })
-        if (evidenceRows.length === 0 || !evidenceRows.every((r) => r.status === 'valid')) {
+        if (!isLifecycleAction(grant.action) && (evidenceRows.length === 0 || !evidenceRows.every((r) => r.status === 'valid'))) {
           return { error: 'conflict' as const }
         }
         // 正式保存的正文必须与用户实际看到的版本逐字一致（服务端重算 hash）。
@@ -869,11 +888,29 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         const differences = await this.targetDifferences(tx, p.ownerId, targets)
         if (differences.length) return { error: 'conflict' as const, differences }
         // 权限、原始产品投影版本、范围 hash 都在写事务内重读，封闭事务外复核后的竞态。
-        if (!await this.validEvidence(tx, p.ownerId, draftRow.sessionId, evidence)) return { error: 'conflict' as const }
+        if (!isLifecycleAction(grant.action) && !await this.validEvidence(tx, p.ownerId, draftRow.sessionId, evidence)) return { error: 'conflict' as const }
         const bodyJson = presentationJson({ body, evidence, version: draftRow.version, action: grant.action, targets })
         const bodyHash = sha256(bodyJson)
         if (bodyHash !== grant.bodyHash) return { error: 'conflict' as const }
 
+        if (isLifecycleAction(grant.action)) {
+          const target = targets[0]
+          if (targets.length !== 1 || !target ||
+              (grant.action === 'reactivate' && target.status !== 'inactive') ||
+              (grant.action === 'deactivate' && target.status !== 'active')) return { error: 'conflict' as const }
+          const status = grant.action === 'delete' ? 'deleted' : grant.action === 'deactivate' ? 'inactive' : 'active'
+          if (status === 'deleted') await hardDeleteRecord(tx, p.ownerId, target.record_id, p.now)
+          else await tx.reflectionRecord.update({ where: { id: target.record_id }, data: { status, generation: { increment: 1 } } })
+          const result: CommitResult = { recordId: target.record_id, revision: target.version,
+            title: status === 'deleted' ? '' : draftRow.title, category: status === 'deleted' ? 'other' : draftRow.category,
+            status, evidenceStatus: target.evidence_status }
+          if (this.options.failEventWrite?.('record_commit')) throw new Error('injected event write failure')
+          await tx.reflectionEvent.create({ data: { ownerId: p.ownerId, objectId: target.record_id, action: `record_${grant.action}`, version: target.version, result: 'ok' } })
+          if (status !== 'deleted') await tx.reflectionIdempotency.create({ data: { key, ownerId: p.ownerId, recordId: target.record_id, resultJson: JSON.stringify(result) } })
+          await tx.reflectionGrant.update({ where: { id: grant.id }, data: { status: 'consumed', consumedAt: p.now } })
+          if (status !== 'deleted') await tx.reflectionDraft.update({ where: { id: draftRow.id }, data: { status: 'committed', closedAt: p.now, committedRecordId: target.record_id } })
+          return { result, idempotent: false }
+        }
         const modifies = targets.length === 1 && ['revise', 'review'].includes(grant.action)
         const revision = modifies ? targets[0].version + 1 : 1
         const data = {
@@ -941,7 +978,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         })
         // 消费 CAS 失败 = 并发已改变授权；整笔回滚，不产生半套正式结果。
         if (consumed.count !== 1) throw new Error('reflection grant consumed concurrently')
-        await tx.reflectionDraft.update({ where: { id: draftRow.id }, data: { status: 'committed', closedAt: p.now } })
+        await tx.reflectionDraft.update({ where: { id: draftRow.id }, data: { status: 'committed', closedAt: p.now, committedRecordId: record.id } })
         return { result, idempotent: false }
       })
     } catch (err) {
@@ -973,14 +1010,10 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         data: { status: 'revoked', revokedAt: p.now },
       })
       if (draft.status === 'committed' || draft.status === 'cancelled' || draft.status === 'rejected') return
-      if (p.decision === 'reject') {
-        await tx.reflectionEvidence.deleteMany({ where: { draftId: draft.id } })
-        await tx.reflectionDraft.update({
-          where: { id: draft.id },
-          data: { status: 'rejected', closedAt: p.now, contentJson: '{}', title: '' },
-        })
+      if (p.decision === 'reject' || p.decision === 'withdraw') {
+        await purgeDraftCopies(tx, p.ownerId, [draft.id], p.now, p.decision === 'reject' ? 'rejected' : 'cancelled')
       } else {
-        // revise/withdraw：保留正文供 Leader 修订/重新展示，但必须重新展示确认。
+        // revise：保留正文供 Leader 修订/重新展示，但必须重新展示确认。
         await tx.reflectionDraft.update({ where: { id: draft.id }, data: { status: 'pending' } })
       }
       await tx.reflectionEvent.create({

@@ -241,6 +241,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   const stream: EventStream = useEventStream({
     onEvent,
     onOpen: () => {
+      window.dispatchEvent(new Event('reflections:refresh'))
       void compensate()
     },
     onDisconnect: () => {},
@@ -252,6 +253,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     connecting.value = s === 'connecting'
     disconnected.value = s === 'disconnected' || s === 'closed'
     if (s !== 'open') {
+      window.dispatchEvent(new Event('reflections:disconnect'))
       projectionGen++
       projectionReady.value = false
     }
@@ -259,6 +261,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
 
   // ---- SSE 事件分派（业务面）----
   function onEvent(e: SessionEvent): void {
+    if (['tool.end', 'run.completed', 'run.failed', 'session.invalidated'].includes(e.type)) {
+      window.dispatchEvent(new Event('reflections:refresh'))
+    }
     if (e.type === 'background_exec.updated') {
       if (e.sessionId === chat.selectedSession) deps.onBackgroundChanged?.()
       return

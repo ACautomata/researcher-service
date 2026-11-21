@@ -2,7 +2,7 @@
 // 结构化反思块（#1080 RF-T04 · 父规格 I5）：显示操作、完整五部分、版本与不可逆影响。
 // 正文不经工具行（4KiB 截断）——按展示引用读取完整版本；浏览器完整渲染后提交 display ack
 // （ack 仅证明客户端已呈现该版本，不是写授权；确认仍由后续用户自然语言消息驱动）。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ackReflectionDisplay, getReflectionDisplay, type ReflectionDisplay } from '@/api/reflections'
 import type { PresentationRef } from '@/api/sessions'
 
@@ -16,11 +16,32 @@ const error = ref('')
 const ackState = ref<'idle' | 'sent' | 'failed'>('idle')
 const bodyEl = ref<HTMLElement | null>(null)
 
+let readGeneration = 0
+let refreshTimer: ReturnType<typeof setInterval> | undefined
+let disconnected = false
+
+function clearCachedBody(): void {
+  readGeneration++
+  display.value = null
+}
+function onDisconnect(): void {
+  disconnected = true
+  clearCachedBody()
+}
+async function refresh(): Promise<void> {
+  disconnected = false
+  clearCachedBody()
+  await load()
+  await ackIfRendered()
+}
 async function load(): Promise<void> {
+  const generation = ++readGeneration
   error.value = ''
   try {
-    display.value = await getReflectionDisplay(props.presentation.displayId)
+    const shown = await getReflectionDisplay(props.presentation.displayId)
+    if (generation === readGeneration) display.value = shown
   } catch (err) {
+    if (generation !== readGeneration) return
     display.value = null
     error.value = err instanceof Error && err.message ? err.message : '反思展示读取失败'
   }
@@ -48,19 +69,36 @@ async function ackIfRendered(): Promise<void> {
 }
 
 onMounted(async () => {
+  window.addEventListener('reflections:refresh', refresh)
+  window.addEventListener('reflections:disconnect', onDisconnect)
+  window.addEventListener('focus', refresh)
+  // 跨会话删除也需失效；轮询只重读引用，不把正文存入浏览器持久缓存。
+  refreshTimer = setInterval(() => { if (!disconnected) void refresh() }, 60_000)
   await load()
   await ackIfRendered()
+})
+
+onUnmounted(() => {
+  clearCachedBody()
+  clearInterval(refreshTimer)
+  window.removeEventListener('reflections:refresh', refresh)
+  window.removeEventListener('reflections:disconnect', onDisconnect)
+  window.removeEventListener('focus', refresh)
 })
 
 watch(() => [props.presentation.displayId, props.presentation.version, props.messageId], async () => {
   ackState.value = 'idle'
+  clearCachedBody()
   await load()
   await ackIfRendered()
 })
 
-const operationLabel = computed(() => ({ create: '新建反思草稿', revise: '修订反思', replace: '替代反思', merge: '合并反思', review: '复核反思' }[display.value?.action ?? 'create'] ?? '反思操作'))
+const operationLabel = computed(() => ({ create: '新建反思草稿', revise: '修订反思', replace: '替代反思', merge: '合并反思', review: '复核反思', deactivate: '停用反思', reactivate: '恢复反思', delete: '永久删除反思' }[display.value?.action ?? 'create'] ?? '反思操作'))
 const effect = computed(() => {
   const action = display.value?.action
+  if (action === 'delete') return '确认后不可恢复地清理在线反思存储及系统管理副本；普通对话独立文字、外部导出、截图、第三方及备份不承诺全副本抹除；派生记录独立保留。'
+  if (action === 'deactivate') return '确认后停用，退出主动使用。'
+  if (action === 'reactivate') return '确认后只恢复生命周期；证据待复核仍不进入主动使用，已替代记录不能直接激活。'
   if (action === 'merge' || action === 'replace') return '确认后将保存为新记录，以下源记录退出主动使用。'
   if (action === 'review') return '确认后以展示的剩余或补充原始证据保存新版本，恢复有效；旧版本仅供管理查看。'
   if (action === 'revise' && display.value?.targets?.length) return '确认后更新同一记录的新版本，包含正文、类别及适用范围；旧版本仅供管理查看。'

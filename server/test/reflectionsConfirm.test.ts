@@ -412,7 +412,7 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
     expect(await prisma.reflectionRecord.count({ where: { ownerId } })).toBe(0)
   })
 
-  it('撤回未提交的确认：撤销 grant、草稿回 pending，原确认不能再提交', async () => {
+  it('撤回未提交的确认：撤销 grant、清理草稿副本，原确认不能再提交', async () => {
     const display = await seedPresentation()
     const first = await seedUserMessage('保存这一版')
     expect((await runtime.service.confirmTurn(leader(first.id), classifierReturning('confirm'))).status).toBe('granted')
@@ -420,7 +420,7 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
     const outcome = await runtime.service.confirmTurn(leader(withdraw.id), classifierReturning('withdraw'))
     expect(outcome.status).toBe('withdrawn')
     expect((await prisma.reflectionGrant.findFirst({ where: { confirmationMessageId: first.id } }))?.status).toBe('revoked')
-    expect((await prisma.reflectionDraft.findUnique({ where: { id: display.draftId } }))?.status).toBe('pending')
+    expect((await prisma.reflectionDraft.findUnique({ where: { id: display.draftId } }))?.status).toBe('cancelled')
     const commit = await runtime.service.execute(leader(first.id), {
       operation: 'commit',
       draft_id: display.draftId,
