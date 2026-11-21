@@ -11,6 +11,8 @@
 # OPENCLAW_IMAGE 拉取面随之退役；named context 现仅 plugins/。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时拉面板镜像复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
+# 宿主→GHCR 拉大层阵发 EOF 时（2026-11-21 事故）自动降级为 runner 直传：runner 从 GHCR 拉本 run
+# 刚推送的镜像 → docker save → SSH → 宿主 docker load，部署不再依赖宿主到 GHCR 的 blob 链路。
 #
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
@@ -260,7 +262,14 @@ jobs:
           strip_components: 1   # 去掉 _deploy/ 前缀，内容平铺到 /www/panel/ 根部
           overwrite: true
 
-      - name: Deploy over SSH (login → pull → up → health gate)
+      - name: Pull images on host (login → pull)
+        id: pull
+        # 2026-11-21 部署事故：宿主→GHCR 大 blob（package.json 改动后重建的 332.9MB npm ci 层）
+        # 连续多次在接近 100% 时 unexpected EOF；Docker 层下载无断点续传，重试即整层重来，30m
+        # 内永远拉不完。故本步骤失败不再直接红：下面的 fallback 步骤由 runner 直传
+        # （docker pull → docker save → SSH → docker load），部署不再依赖宿主到 GHCR 的 blob 链路。
+        # 仍先试 pull 的原因：正常发版的小层增量走既有路径最快，只有大层失败时才付直传的成本。
+        continue-on-error: true
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
         env:
           GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
@@ -272,11 +281,9 @@ jobs:
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,GHCR_FALLBACK_USER,GHCR_FALLBACK_TOKEN
-          # 2026-11-20 #1055 部署事故（CD run #358 attempt 1-3）：#1060 给 server 新增 adm-zip 依赖后，
-          # 宿主首次需整层拉取 ~200MB 级 node_modules 层，宿主→GHCR blob 链路阵发 EOF；重试期间
-          # ssh-action 默认 10m command_timeout 两次 Run Command Timeout 腰斩下载中段（当时层以
-          # ~2.4MB/s 稳定流速）。放宽到 30m，给下方 pull 重试留足预算。
-          command_timeout: 30m
+          # 2026-11-20 #1055 后曾放宽到 30m / 6 次；2026-11-21 起失败会落到 runner 直传，
+          # 宿主拉大层的预算不必再撑到 30m：2 次尝试、20m 足够让正常增量（单层 ~3-8m）拉完。
+          command_timeout: 20m
           script: |
             set -euo pipefail
 
@@ -306,11 +313,9 @@ jobs:
             # 只拉随发版变化的 ghcr 服务：redis:7-alpine 钉版且宿主已有镜像，每版都绕道
             # Docker Hub 纯属扩大失败面（2026-10-22 即断在 registry-1.docker.io 的 TLS 握手超时）；
             # 真缺镜像时 up -d 会自行补拉。
-            # 重试吃掉 registry 瞬时抖动，但不加 --ignore-pull-failures——那会静默部署旧镜像。
+            # 不加 --ignore-pull-failures——那会静默部署旧镜像。
             pull_ok=0
-            # 2026-11-20 #1055 部署事故：EOF 阵发且 Docker 层下载无断点续传，失败即整层重来；
-            # 3×10s 预算不足 → 6 次重试、20s 间隔（链路通畅时单次整层 ~80s 可完成）。
-            for attempt in 1 2 3 4 5 6; do
+            for attempt in 1 2; do
               if docker compose -f docker-compose.deploy.yml pull frontend server searxng; then
                 pull_ok=1
                 break
@@ -319,9 +324,93 @@ jobs:
               sleep 20
             done
             if [ "$pull_ok" != "1" ]; then
-              echo "[deploy] ERROR: image pull failed after 3 attempts" >&2
+              echo "[deploy] ERROR: image pull failed after 2 attempts (fallback: runner direct transfer)" >&2
               exit 1
             fi
+
+      - name: Preload server image over SSH (pull fallback)
+        # runner → GHCR 走 GitHub 内网/高速路径（镜像刚由本 run 推送），再把镜像 docker save
+        # 经 SSH 灌给宿主 docker load。宿主已缓存的层也会随 tar 一起传输（docker save 不能
+        # 只导缺失层），所以本步骤只在 pull 失败时才跑；一次成功后同 package.json 的后续发版
+        # 层 digest 稳定（实测复用），正常增量仍走上方 pull、不付这份传输成本。
+        if: steps.pull.outcome == 'failure'
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file="$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$DEPLOY_KEY" > "$key_file"
+          trap 'rm -f "$key_file"' EXIT
+          ssh_opts=(
+            -i "$key_file"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=accept-new
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=4
+            -o Compression=no
+          )
+          # runner 已由上方 login-action 登录 GHCR（GITHUB_TOKEN，packages:write ⊇ read）。
+          # 拉精确 sha tag（避免 latest 漂移），并补上 compose .env 实际引用的 :latest。
+          docker pull "$SERVER_IMAGE:$IMAGE_TAG"
+          docker tag "$SERVER_IMAGE:$IMAGE_TAG" "$SERVER_IMAGE:latest"
+          ok=0
+          for attempt in 1 2 3; do
+            # timeout 兜底：链路“慢但不死”时 ServerAlive 不会触发，单次传输给 30m 上限再重试。
+            if docker save "$SERVER_IMAGE:latest" "$SERVER_IMAGE:$IMAGE_TAG" \
+                | timeout 1800 ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'docker load'; then
+              ok=1
+              break
+            fi
+            echo "[cd] server image transfer attempt $attempt failed, retrying in 20s ..." >&2
+            sleep 20
+          done
+          if [ "$ok" != "1" ]; then
+            echo "[cd] ERROR: server image direct transfer failed after 3 attempts" >&2
+            exit 1
+          fi
+          ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" \
+            "docker image inspect '$SERVER_IMAGE:latest' >/dev/null"
+          echo "[cd] server image loaded on host ✓"
+
+      - name: Retry pull after preload
+        # 直传只兜 server；frontend / searxng 的新层仍走宿主 pull（正常只有几 MB 的小层）。
+        # server 已在本地，这次 compose pull 不会重新下载 332.9MB 大层。
+        if: steps.pull.outcome == 'failure'
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            cd /www/panel
+            for attempt in 1 2; do
+              if docker compose -f docker-compose.deploy.yml pull frontend server searxng; then
+                exit 0
+              fi
+              echo "[deploy] post-preload pull attempt $attempt failed, retrying in 20s ..." >&2
+              sleep 20
+            done
+            echo "[deploy] ERROR: image pull failed even after preload" >&2
+            exit 1
+
+      - name: Deploy over SSH (up → prune → health gate → search smoke)
+        # 镜像已在上方 pull / 直传落位；这里不再 pull（2026-11-21 起部署不依赖宿主到 GHCR 的
+        # blob 链路）。up -d 仅在镜像缺失时才自行拉取（如首次缺 redis:7-alpine）。
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            cd /www/panel
             # T0 #801 起 openclaw 镜像不再随发版变化；#858 起 fleet 整体退役，沙箱/wiki 容器
             # 镜像均为公开钉版引用——首次缺缓存时由 server 侧 dockerode 裸 pull（daemon 侧
             # 持久登录凭证）补齐。
