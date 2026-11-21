@@ -119,4 +119,18 @@ describe('ReflectionBlock', () => {
     await flushPromises()
     expect(ackReflectionDisplay).not.toHaveBeenCalled()
   })
+  it('合并完整动作列出每个源版本和退出主动使用的影响，全文渲染后 ack', async () => {
+    getReflectionDisplay.mockResolvedValue(displayWith({ action: 'merge', targets: [
+      { record_id: 'source-a', version: 3, status: 'active', evidence_status: 'valid' },
+      { record_id: 'source-b', version: 7, status: 'active', evidence_status: 'valid' },
+    ] }))
+    const w = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
+    await flushPromises()
+    expect(w.text()).toContain('合并反思')
+    expect(w.text()).toContain('源记录退出主动使用')
+    expect(w.get('[data-test="reflection-targets"]').text()).toContain('source-a · 基准 v3')
+    expect(w.get('[data-test="reflection-targets"]').text()).toContain('source-b · 基准 v7')
+    expect(ackReflectionDisplay).toHaveBeenCalledOnce()
+  })
+
 })

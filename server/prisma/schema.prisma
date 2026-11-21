@@ -1067,3 +1067,16 @@ model ReflectionEvent {
   @@index([ownerId, objectId])
   @@map("reflection_events")
 }
+
+// #1086：持久反思 episode（仅 hash/引用；不保存用户问题和证据正文）。
+model ReflectionEpisode {
+  id String @id
+  ownerId String
+  sessionId String
+  requestId String
+  draftId String?
+  createdAt DateTime @default(now())
+
+  @@index([ownerId, requestId])
+  @@map("reflection_episodes")
+}

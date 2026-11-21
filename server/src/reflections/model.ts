@@ -13,6 +13,10 @@ import {
 } from './values'
 
 export interface ReflectionContext {
+  readonly analysisCompleted?: boolean
+  readonly enhancementUnavailable?: boolean
+  /** 仅由历史 read 实际交付的稳定来源；模型参数不能声明。 */
+  readonly historyEvidence?: ReadonlySet<string>
   readonly ownerId: string
   readonly currentSessionId: string
   readonly role: 'leader' | 'teammate' | 'wiki-update' | 'subagent'
@@ -98,13 +102,24 @@ export interface EvidenceSource {
 
 // ---- 草稿 / 展示 ----
 
+export interface ReflectionTarget {
+  readonly record_id: string
+  readonly version: number
+  readonly generation: number
+  readonly status: string
+  readonly evidence_status: string
+  readonly evidence_hash: string
+}
+
 export interface DraftRecord {
+  readonly alreadyAnalyzed?: boolean
   readonly id: string
   readonly ownerId: string
   readonly sessionId: string
   readonly version: number
   readonly status: ReflectionDraftStatus
   readonly action: string
+  readonly targets?: readonly ReflectionTarget[]
   readonly body: DraftBody
   readonly evidence: readonly EvidenceRecord[]
   readonly createdAt: string
@@ -118,6 +133,7 @@ export interface PresentationRecord {
   readonly draftId: string
   readonly draftVersion: number
   readonly action: string
+  readonly targets?: readonly ReflectionTarget[]
   readonly body: DraftBody
   readonly evidence: readonly EvidenceRecord[]
   readonly bodyHash: string
@@ -142,6 +158,7 @@ export type ConfirmationDecision = (typeof REFLECTION_CONFIRMATION_DECISIONS)[nu
 
 // 服务端生成的唯一动作快照（分类器只读它，不接收模型可自填的 approved/grant/token）。
 export interface ConfirmationActionSnapshot {
+  readonly targets?: readonly ReflectionTarget[]
   readonly displayId: string
   readonly draftId: string
   readonly version: number
@@ -247,6 +264,7 @@ export interface RecordRevisionMeta {
 }
 
 export interface RecordDetail {
+  readonly generation: number
   readonly recordId: string
   readonly ownerId: string
   readonly sessionId: string
@@ -264,7 +282,7 @@ export interface RecordDetail {
 
 export type CommitOutcome =
   | { readonly result: CommitResult; readonly idempotent: boolean }
-  | { readonly error: 'not_found' | 'revoked' | 'expired' | 'limit' | 'conflict' }
+  | { readonly error: 'not_found' | 'revoked' | 'expired' | 'limit' | 'conflict' | 'cancelled'; readonly differences?: readonly unknown[] }
 
 // ---- 记录检索（#1082・RF-T06）----
 
@@ -389,6 +407,8 @@ export interface ReflectionEvidencePort {
 }
 
 export interface ReflectionStore {
+  analysisCompleted(context: ReflectionContext): Promise<boolean>
+  completeAnalysis(context: ReflectionContext): Promise<void>
   createDraft(p: {
     ownerId: string
     sessionId: string
@@ -396,6 +416,8 @@ export interface ReflectionStore {
     evidence: readonly EvidenceRecord[]
     status: ReflectionDraftStatus
     action: string
+    targets?: readonly ReflectionTarget[]
+    episode?: { id: string; requestId: string }
   }): Promise<DraftRecord>
   getDraft(ownerId: string, draftId: string): Promise<DraftRecord | null>
   reviseDraft(p: {
@@ -470,6 +492,7 @@ export interface ReflectionStore {
     draftId: string
     draftVersion: number
     now: Date
+    signal?: AbortSignal
   }): Promise<CommitOutcome>
   /**
    * 用户对候选说 reject/revise/withdraw：撤销未消费授权与展示；
@@ -522,6 +545,7 @@ export interface ReflectionError {
 }
 
 export interface ReflectionResult {
+  readonly differences?: readonly unknown[]
   readonly outcome: 'success' | 'partial_success' | 'failure'
   readonly progress: 'complete' | 'more' | 'stopped'
   readonly operation: string

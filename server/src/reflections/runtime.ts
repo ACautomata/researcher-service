@@ -18,6 +18,8 @@ export interface ReflectionsRuntimeOptions extends Omit<ReflectionServiceOptions
 }
 
 export interface ReflectionsPort {
+  analysisCompleted: PrismaReflectionStore['analysisCompleted']
+  completeAnalysis: PrismaReflectionStore['completeAnalysis']
   execute: ReflectionService['execute']
   confirmTurn: ReflectionService['confirmTurn']
   displayBodyText: ReflectionService['displayBodyText']
@@ -53,6 +55,8 @@ export function createReflectionsRuntime(
     ...(budget ? { budget } : {}),
   })
   const port: ReflectionsPort = {
+    analysisCompleted: context => store.analysisCompleted(context),
+    completeAnalysis: context => store.completeAnalysis(context),
     execute: (context, request, signal) => service.execute(context, request, signal),
     confirmTurn: (context, classifier) => service.confirmTurn(context, classifier),
     displayBodyText: (ownerId, displayId) => service.displayBodyText(ownerId, displayId),

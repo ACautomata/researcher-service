@@ -1,0 +1,353 @@
+// #1081（RF-T05）自然语言确认授权与幂等正式保存验收：真实临时 SQLite + 业务口 + 注入确认识别器。
+//
+// 覆盖父规格 I3/I5 的可观察行为：ack 早于确认消息才签 grant、含糊/否定/撤回不授权、伪造参数无效、
+// 同一确认消息重试/并发只产生一条正式记录、授权过窗与提交次数上限、已提交独立保留。
+
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import Database from 'better-sqlite3'
+import { createPrismaClient } from '../src/prisma'
+import type { PrismaClient } from '../src/generated/prisma/client'
+import { createReflectionsRuntime, type ReflectionsRuntime } from '../src/reflections/runtime'
+import type {
+  ConfirmationClassification,
+  ConfirmationDecision,
+  ReflectionContext,
+} from '../src/reflections/model'
+import { serializeAttachments } from '../src/sessions/reducer'
+import { seedUser } from './helpers'
+
+const INIT_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'utf8')
+
+const DRAFT = {
+  operation: 'draft' as const,
+  action: 'create' as const,
+  category: 'tool_use' as const,
+  title: '工具参数验证遗漏',
+  problem: '修改文件后没有验证，导致问题反复。',
+  causes: [{ text: '缺少写后验证步骤', kind: 'fact' as const, evidence: [1] }],
+  improvements: ['遇到写文件后先运行聚焦测试再汇报'],
+  scope: { labels: ['工具使用'], conditions: '涉及文件写入时', exclusions: '纯问答' },
+}
+
+function classifierReturning(decision: ConfirmationDecision, reason?: string) {
+  return async (): Promise<ConfirmationClassification> => ({ decision, ...(reason ? { reason } : {}) })
+}
+
+describe('#1083 完整确认路径的正式记录变更', () => {
+  let dir: string
+  let prisma: PrismaClient
+  let runtime: ReflectionsRuntime
+  let ownerId: string
+  let sessionId: string
+  let turn: number
+
+  beforeAll(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), `panel-1081-${process.pid}-`))
+    const dbPath = path.join(dir, 'test.db')
+    const sqlite = new Database(dbPath)
+    sqlite.exec(INIT_SQL)
+    sqlite.exec(readFileSync(path.join(process.cwd(), 'prisma', 'reflection-triggers.sql'), 'utf8'))
+    sqlite.close()
+    process.env.DATABASE_URL = `file:${dbPath}`
+    process.env.NODE_ENV = 'test'
+    prisma = createPrismaClient(`file:${dbPath}`)
+    runtime = createReflectionsRuntime(prisma)
+    const user = await seedUser(prisma, 'rf-confirm-owner', 'pw-rf-confirm-secure')
+    ownerId = user.id
+    const session = await prisma.session.create({ data: { ownerId, containerId: 'researcher-sandbox-rfc', title: '确认会话' } })
+    sessionId = session.id
+    turn = 100
+  }, 30_000)
+
+  afterAll(async () => {
+    await prisma.$disconnect()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  afterEach(async () => {
+    await prisma.reflectionIdempotency.deleteMany({})
+    await prisma.reflectionGrant.deleteMany({})
+    await prisma.reflectionRevision.deleteMany({})
+    await prisma.reflectionRecord.deleteMany({})
+    await prisma.reflectionPresentation.deleteMany({})
+    await prisma.reflectionEvidence.deleteMany({})
+    await prisma.reflectionDraft.deleteMany({})
+    await prisma.reflectionEvent.deleteMany({})
+    await prisma.sessionMessage.deleteMany({ where: { sessionId } })
+    await prisma.session.deleteMany({ where: { ownerId, id: { not: sessionId } } })
+    turn = 100
+  })
+
+  const leader = (triggerMessageId?: string): ReflectionContext => ({
+    ownerId,
+    currentSessionId: sessionId,
+    role: 'leader',
+    ...(triggerMessageId ? { triggerMessageId } : {}),
+  })
+
+  async function seedAssistant(content: string): Promise<{ id: string }> {
+    turn += 1
+    const row = await prisma.sessionMessage.create({
+      data: { sessionId, turn, role: 'assistant', content, attachmentsJson: serializeAttachments({ thinking: '思考' }) },
+    })
+    return { id: row.id }
+  }
+
+  async function seedUserMessage(content: string): Promise<{ id: string }> {
+    turn += 1
+    const row = await prisma.sessionMessage.create({
+      data: { sessionId, turn, role: 'user', content, attachmentsJson: serializeAttachments({}) },
+    })
+    return { id: row.id }
+  }
+
+  async function bindAndAck(displayId: string, version: number, bodyHash: string): Promise<string> {
+    turn += 1
+    const bound = await prisma.sessionMessage.create({
+      data: {
+        sessionId,
+        turn,
+        role: 'assistant',
+        content: '这是反思草稿。',
+        attachmentsJson: serializeAttachments({
+          presentations: [{ displayId, draftId: (await prisma.reflectionPresentation.findUniqueOrThrow({ where: { displayId } })).draftId, version, bodyHash, status: 'pending' as never, confirmable: true }],
+        }),
+      },
+    })
+    await runtime.store.bindInFlightEvidence({ ownerId, sessionId, runId: 'run-unused', messageId: bound.id, displayIds: [displayId] })
+    const acked = await runtime.service.ackDisplay(ownerId, displayId, { version, hash: bodyHash, messageId: bound.id })
+    expect('seq' in acked).toBe(true)
+    return bound.id
+  }
+
+
+  async function newDraft(extra: Record<string, unknown> = {}) {
+    const source = await seedAssistant('写文件后没有运行测试，导致回归。')
+    const result = await runtime.service.execute(leader(), {
+      ...DRAFT,
+      evidence: [{ message_id: source.id, region: 'content', excerpt: '写文件后没有运行测试，导致回归。' }],
+      ...extra,
+    })
+    expect(result.outcome, JSON.stringify(result)).toBe('success')
+    const d = result.draft as { draft_id: string; version: number }
+    return { draft_id: d.draft_id, version: d.version }
+  }
+
+  async function authorize(draft: { draft_id: string; version: number }) {
+    const result = await runtime.service.execute(leader(), { operation: 'present', ...draft })
+    expect(result.outcome, JSON.stringify(result)).toBe('success')
+    const p = result.presentation as { displayId: string; bodyHash: string }
+    await bindAndAck(p.displayId, draft.version, p.bodyHash)
+    const message = await seedUserMessage('确认保存上面完整的操作')
+    expect((await runtime.service.confirmTurn(leader(message.id), classifierReturning('confirm'))).status).toBe('granted')
+    return leader(message.id)
+  }
+
+  async function save(extra: Record<string, unknown> = {}) {
+    const draft = await newDraft(extra)
+    const context = await authorize(draft)
+    const result = await runtime.service.execute(context, { operation: 'commit', ...draft })
+    expect(result.outcome, JSON.stringify(result)).toBe('success')
+    return (result.record as { record_id: string; revision: number })
+  }
+
+  it('RF10 修订正式记录：同 record 新 revision，元数据也须完整展示确认', async () => {
+    const first = await save()
+    const draft = await newDraft({ action: 'revise', targets: [{ record_id: first.record_id, version: 1 }], title: '更正后的教训' })
+    const denied = await runtime.service.execute(leader(), { operation: 'commit', ...draft })
+    expect(denied.error?.code).toBe('confirmation_required')
+    const context = await authorize(draft)
+    const saved = await runtime.service.execute(context, { operation: 'commit', ...draft })
+    expect(saved.record).toMatchObject({ record_id: first.record_id, revision: 2 })
+    const old = await runtime.service.execute({ ...leader(), managementIntent: true }, { operation: 'read', purpose: 'management', targets: [{ record_id: first.record_id, version: 1 }] })
+    expect(old.records).toMatchObject([{ version: 1, is_current: false }])
+    const replay = await runtime.service.execute(context, { operation: 'commit', ...draft })
+    expect(replay.record).toMatchObject({ record_id: first.record_id, revision: 2 })
+  })
+  it('RF10 合并作为一个确认动作：来源去重，保留关系，源记录退出主动使用', async () => {
+    const a = await save()
+    const b = await save()
+    const merged = await save({ action: 'merge', targets: [a, b].map(r => ({ record_id: r.record_id, version: 1 })) })
+    expect(merged.record_id).not.toBe(a.record_id)
+    const search = await runtime.service.execute(leader(), { operation: 'search' })
+    expect(search.records).toMatchObject([{ record_id: merged.record_id }])
+    expect(search.count).toBe(1)
+    const draft = await newDraft({ action: 'replace', targets: [{ record_id: merged.record_id, version: 1 }] })
+    const shown = await runtime.service.execute(leader(), { operation: 'present', ...draft })
+    const display = await runtime.service.getDisplay(ownerId, (shown.presentation as { displayId: string }).displayId)
+    expect(display).toMatchObject({ action: 'replace', targets: [{ record_id: merged.record_id, version: 1 }] })
+    expect((await runtime.service.execute(leader(), { ...DRAFT, action: 'replace', targets: [{ record_id: a.record_id, version: 1 }], evidence: [] })).outcome).toBe('failure')
+  })
+
+  it('RF07/RF10 两会话同基准修订：后提交者整体冲突，旧确认不改写新版本', async () => {
+    const first = await save()
+    const targets = [{ record_id: first.record_id, version: 1 }]
+    const a = await newDraft({ action: 'revise', targets, title: '会话 A 的修订' })
+    const ca = await authorize(a)
+    const originalSession = sessionId
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'other-sandbox', title: '第二会话' } })).id
+    const b = await newDraft({ action: 'revise', targets, title: '会话 B 的修订' })
+    const cb = await authorize(b)
+    expect((await runtime.service.execute(cb, { operation: 'commit', ...b })).outcome).toBe('success')
+    sessionId = originalSession
+    const conflict = await runtime.service.execute(ca, { operation: 'commit', ...a })
+    expect(conflict.error?.code).toBe('conflict')
+    expect(conflict.differences).toMatchObject([{ expected_version: 1, actual_version: 2 }])
+    expect((await runtime.service.execute(leader(), { operation: 'read', targets: [{ record_id: first.record_id }] })).records).toMatchObject([{ title: '会话 B 的修订', version: 2 }])
+  })
+
+  it('RF10 合并中一源变化：所有源保持原状，不留下半个新记录', async () => {
+    const a = await save()
+    const b = await save()
+    const merge = await newDraft({ action: 'merge', targets: [a, b].map(r => ({ record_id: r.record_id, version: 1 })) })
+    const context = await authorize(merge)
+    const originalSession = sessionId
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'merge-race', title: '并发修改来源' } })).id
+    await save({ action: 'revise', targets: [{ record_id: b.record_id, version: 1 }] })
+    sessionId = originalSession
+    const conflict = await runtime.service.execute(context, { operation: 'commit', ...merge })
+    expect(conflict.error?.code).toBe('conflict')
+    const search = await runtime.service.execute(leader(), { operation: 'search' })
+    expect(search.count).toBe(2)
+    expect((search.records as { status: string }[]).every(r => r.status === 'active')).toBe(true)
+  })
+
+  it('RF13 待复核经验不能合并洗白；剩余/补充原始证据重新确认才恢复 valid', async () => {
+    const first = await save()
+    // 真来源变更触发失效，不直接伪造记录状态。
+    const original = await prisma.reflectionRecordEvidence.findFirstOrThrow({ where: { recordId: first.record_id } })
+    await prisma.sessionMessage.update({ where: { id: original.messageId! }, data: { content: '原始内容已变化' } })
+    const source = await seedAssistant('补充证据：仍然遗漏验证。')
+    const base = { ...DRAFT, targets: [{ record_id: first.record_id, version: 1 }], evidence: [{ message_id: source.id, region: 'content', excerpt: '补充证据：仍然遗漏验证。' }] }
+    expect((await runtime.service.execute(leader(), { ...base, action: 'merge' })).error?.code).toBe('not_ready')
+    const draftResult = await runtime.service.execute(leader(), { ...base, action: 'review' })
+    expect(draftResult.outcome).toBe('success')
+    const raw = draftResult.draft as { draft_id: string; version: number }
+    const draft = { draft_id: raw.draft_id, version: raw.version }
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+    const context = await authorize(draft)
+    expect((await runtime.service.execute(context, { operation: 'commit', ...draft })).record).toMatchObject({ record_id: first.record_id, revision: 2, evidence_status: 'valid' })
+    await prisma.sessionMessage.update({ where: { id: original.messageId! }, data: { content: '旧版本来源再次变化' } })
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(1)
+  })
+
+  it('RF23 同主请求同 episode 经 runtime 重建仍只产生一个草稿；新证据可再分析', async () => {
+    const source = await seedAssistant('写文件后没有运行测试，导致回归。')
+    const trigger = await seedUserMessage('纠正刚才的验证遗漏并继续任务')
+    const input = { ...DRAFT, evidence: [{ message_id: source.id, region: 'content', excerpt: '写文件后没有运行测试，导致回归。' }] }
+    const context = { ...leader(trigger.id), requestId: trigger.id }
+    const first = await runtime.service.execute(context, input)
+    runtime.dispose()
+    runtime = createReflectionsRuntime(prisma)
+    const repeated = await runtime.service.execute(context, { ...input, title: '换个标题重复反思' })
+    expect((repeated.draft as { draft_id: string }).draft_id).toBe((first.draft as { draft_id: string }).draft_id)
+    expect(repeated.status).toBe('already_analyzed')
+    await prisma.sessionMessage.update({ where: { id: source.id }, data: { content: '写文件后没有运行测试，导致回归。新证据版本' } })
+    const fresh = await runtime.service.execute(context, input)
+    expect((fresh.draft as { draft_id: string }).draft_id).not.toBe((first.draft as { draft_id: string }).draft_id)
+  })
+
+  it('RF10 原始来源重复去重但合并保留每条来源关系', async () => {
+    const source = await seedAssistant('共享原始证据')
+    const evidence = [{ message_id: source.id, region: 'content', excerpt: '共享原始证据' }]
+    const a = await save({ evidence })
+    const b = await save({ evidence })
+    const draft = await newDraft({ action: 'merge', targets: [a, b].map(r => ({ record_id: r.record_id, version: 1 })), evidence: [...evidence, ...evidence] })
+    const presented = await runtime.service.execute(leader(), { operation: 'present', ...draft })
+    const display = await runtime.service.getDisplay(ownerId, (presented.presentation as { displayId: string }).displayId)
+    expect(display?.evidence).toHaveLength(1)
+    expect(display?.targets).toHaveLength(2)
+    expect(display?.body?.causes[0].evidence).toEqual([1])
+  })
+
+  it('RF07/RF13 事务前真实连接屏障：授权后来源变化不保存', async () => {
+    const draft = await newDraft()
+    const context = await authorize(draft)
+    let entered!: () => void
+    let release!: () => void
+    const reached = new Promise<void>(r => { entered = r })
+    const gate = new Promise<void>(r => { release = r })
+    const delayed = createReflectionsRuntime(prisma, {}, { beforeCommitTransaction: async () => { entered(); await gate } })
+    const committing = delayed.service.execute(context, { operation: 'commit', ...draft })
+    await reached
+    const original = await prisma.reflectionEvidence.findFirstOrThrow({ where: { draftId: draft.draft_id } })
+    const writer = createPrismaClient(process.env.DATABASE_URL!)
+    await writer.sessionMessage.update({ where: { id: original.messageId! }, data: { content: '独立连接在提交前更改来源' } })
+    await writer.$disconnect()
+    release()
+    expect((await committing).outcome).toBe('failure')
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+    delayed.dispose()
+  })
+
+  it('RF07 授权后墓碑 generation 变化或目标删除，旧确认不能复活记录', async () => {
+    const first = await save()
+    const draft = await newDraft({ action: 'replace', targets: [{ record_id: first.record_id, version: 1 }] })
+    const context = await authorize(draft)
+    await prisma.reflectionRecord.update({ where: { id: first.record_id }, data: { generation: { increment: 1 }, status: 'deleted', contentJson: '{}' } })
+    const result = await runtime.service.execute(context, { operation: 'commit', ...draft })
+    expect(result.error?.code).toBe('conflict')
+    expect(result.differences).toMatchObject([{ expected_generation: 1, actual_generation: 2, status: 'deleted' }])
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+  })
+
+  it('RF10 已替代的源不能重新作为替代目标形成环；merge 最多 8 个目标', async () => {
+    const first = await save()
+    await save({ action: 'replace', targets: [{ record_id: first.record_id, version: 1 }] })
+    const source = await seedAssistant('范围证据')
+    const input = { ...DRAFT, evidence: [{ message_id: source.id, region: 'content', excerpt: '范围证据' }] }
+    expect((await runtime.service.execute(leader(), { ...input, action: 'replace', targets: [{ record_id: first.record_id, version: 1 }] })).error?.code).toBe('conflict')
+    expect((await runtime.service.execute(leader(), { ...input, action: 'merge', targets: Array.from({ length: 9 }, (_, i) => ({ record_id: `record-${i}`, version: 1 })) })).error?.code).toBe('invalid_parameters')
+  })
+
+  it('RF13 修改未提交合并草稿仍保留全部根证据，源变化继续使结果失效', async () => {
+    const a = await save()
+    const b = await save()
+    const draft = await newDraft({ action: 'merge', targets: [a, b].map(r => ({ record_id: r.record_id, version: 1 })) })
+    const source = await seedAssistant('修订合并描述的补充来源')
+    const updated = await runtime.service.execute(leader(), {
+      ...DRAFT, action: 'revise', draft_id: draft.draft_id, base_version: 1,
+      evidence: [{ message_id: source.id, region: 'content', excerpt: '修订合并描述的补充来源' }],
+    })
+    expect(updated.outcome).toBe('success')
+    const revised = { draft_id: draft.draft_id, version: 2 }
+    const context = await authorize(revised)
+    const saved = await runtime.service.execute(context, { operation: 'commit', ...revised })
+    expect(saved.outcome).toBe('success')
+    const root = await prisma.reflectionRecordEvidence.findFirstOrThrow({ where: { recordId: a.record_id } })
+    await prisma.sessionMessage.update({ where: { id: root.messageId! }, data: { content: '合并后原始来源变化' } })
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+    const record = saved.record as { record_id: string }
+    const management = await runtime.service.execute({ ...leader(), managementIntent: true }, { operation: 'read', purpose: 'management', targets: [{ record_id: record.record_id }] })
+    expect(management.records).toMatchObject([{ evidence_status: 'review_required' }])
+  })
+
+  it('RF10 合并继承来源后超过8证据或整体32KiB，拒绝且不改变源记录', async () => {
+    const ids: string[] = []
+    for (let i = 0; i < 8; i++) ids.push((await seedAssistant(`原始证据${i}`)).id)
+    const evidence = ids.map((id, i) => ({ message_id: id, region: 'content', excerpt: `原始证据${i}` }))
+    const a = await save({ evidence })
+    const source = await seedAssistant('新增第九条')
+    const result = await runtime.service.execute(leader(), { ...DRAFT, action: 'replace', targets: [{ record_id: a.record_id, version: 1 }], evidence: [{ message_id: source.id, region: 'content', excerpt: '新增第九条' }] })
+    expect(result.error?.code).toBe('limit')
+    const tooLarge = await runtime.service.execute(leader(), { ...DRAFT, action: 'replace', problem: '界'.repeat(10300), targets: [{ record_id: a.record_id, version: 1 }], evidence: [evidence[0]] })
+    expect(tooLarge.error?.code).toBe('limit')
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(1)
+  })
+
+  it('RF07 修订未提交草稿后，旧版来源变化不误撤新版确认授权', async () => {
+    const draft = await newDraft()
+    const old = await prisma.reflectionEvidence.findFirstOrThrow({ where: { draftId: draft.draft_id } })
+    const source = await seedAssistant('新版草稿的独立原始证据')
+    const result = await runtime.service.execute(leader(), { ...DRAFT, action: 'revise', draft_id: draft.draft_id, base_version: 1, evidence: [{ message_id: source.id, region: 'content', excerpt: '新版草稿的独立原始证据' }] })
+    expect(result.outcome).toBe('success')
+    const revised = { draft_id: draft.draft_id, version: 2 }
+    const context = await authorize(revised)
+    await prisma.sessionMessage.update({ where: { id: old.messageId! }, data: { content: '旧版来源已变化' } })
+    expect((await runtime.service.execute(context, { operation: 'commit', ...revised })).outcome).toBe('success')
+  })
+
+})

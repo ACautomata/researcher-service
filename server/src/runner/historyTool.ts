@@ -4,6 +4,7 @@ import { tool } from '@langchain/core/tools'
 import { SessionHistorySchema } from '../sessions/history/params'
 import type { HistoryContext } from '../sessions/history/model'
 import type { SessionHistoryService } from '../sessions/history/service'
+import { currentReflectionFrame } from './reflectionFrame'
 import { SESSION_HISTORY_TOOL_NAME } from '../sessions/history/values'
 
 export const HISTORY_LEADER_GUIDANCE = `需要以前的讨论证据时才使用 session_history。不知道位置先 search；有可靠 session_id 可直接 read。
@@ -25,7 +26,16 @@ export function createSessionHistoryTool(history: Pick<SessionHistoryService, 'e
     const namespace = config.configurable?.checkpoint_ns
     const child = typeof namespace === 'string' && namespace.includes('|')
     if (!frame || child) return JSON.stringify({ outcome: 'failure', progress: 'stopped', error: { category: 'permission', code: 'leader_only', message: '历史检索仅供 Leader 使用' }, groups: [] })
-    return JSON.stringify(await history.execute(frame.context, request, frame.signal))
+    const result = await history.execute(frame.context, request, frame.signal)
+    const reflection = currentReflectionFrame()
+    if (request.operation === 'read' && reflection?.context.ownerId === frame.context.ownerId) {
+      const sources = reflection.context.historyEvidence as Set<string> | undefined
+      for (const group of result.groups) for (const message of group.messages ?? []) {
+        // 搜索节选、截断与未完整分段不能冒充已阅读的稳定原始证据。
+        if (!message.source_truncated && !message.segment && !message.context_only) sources?.add(`${message.session_id}:${message.message_id}`)
+      }
+    }
+    return JSON.stringify(result)
   }, {
     name: SESSION_HISTORY_TOOL_NAME,
     description: '历史会话检索，仅 Leader 可用。search 无 query 返回目录；query={text,mode?:literal|regex}。例如 {operation:"search",query:{text:"实验方案"}}；按稳定引用读取 {operation:"read",targets:[{session_id:"已知ID",range:{from_turn:1,to_turn:3}}]}。read 返回已保存正文、thinking、工具与附件引用；长正文按 segment 连续分段。more/stopped 附 cursor 时，用同一请求加 cursor 继续。',

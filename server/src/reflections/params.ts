@@ -100,15 +100,22 @@ export const ReflectionReadSchema = z.object({
 
 export const ReflectionDraftSchema = z.object({
   operation: z.literal('draft'),
-  action: z.enum(['create', 'revise']),
+  action: z.enum(['create', 'revise', 'replace', 'merge', 'review']),
+  targets: z.array(z.object({ record_id: id, version: z.number().int().min(1) }).strict()).min(1).max(8).optional(),
   draft_id: id.optional(),
   base_version: z.number().int().min(1).optional(),
   ...DraftContent,
 }).strict().superRefine((v, ctx) => {
+  if (v.targets && (v.draft_id || v.base_version || v.action === 'create' || (v.action !== 'merge' && v.targets.length !== 1) || new Set(v.targets.map(t => t.record_id)).size !== v.targets.length)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: '目标与动作不匹配或重复' })
+  }
+  if (['replace', 'merge', 'review'].includes(v.action) && !v.targets) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: '正式变更需要目标基准版本' })
+  }
   if (v.action === 'create' && v.draft_id !== undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'create 不接受 draft_id' })
   }
-  if (v.action === 'revise' && (v.draft_id === undefined || v.base_version === undefined)) {
+  if (v.action === 'revise' && v.targets === undefined && (v.draft_id === undefined || v.base_version === undefined)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'revise 需要 draft_id 与 base_version' })
   }
 })

@@ -32,6 +32,7 @@ export interface ReflectionDisplay {
   draftId: string
   version: number
   action: string
+  targets?: Array<{ record_id: string; version: number; status: string; evidence_status: string }>
   bodyHash: string
   status: string
   body: {

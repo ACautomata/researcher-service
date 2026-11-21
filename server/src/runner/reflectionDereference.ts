@@ -5,7 +5,7 @@
 // 绝不调用 state reducer/updateState 写回图状态——展开正文不进入 checkpoint。
 
 import { createMiddleware } from 'langchain'
-import type { BaseMessage } from '@langchain/core/messages'
+import { SystemMessage, type BaseMessage } from '@langchain/core/messages'
 import { REFLECTION_BODY_REF_RE, REFLECTION_DRAFT_REF_RE, REFLECTION_RECORD_REF_RE } from '../reflections/values'
 import type { ReflectionService } from '../reflections/service'
 import { currentReflectionFrame } from './reflectionFrame'
@@ -89,9 +89,15 @@ export function createReflectionDereferenceMiddleware(dereference: Dereference) 
   return createMiddleware({
     name: 'reflection-input-dereference',
     wrapModelCall: async (request, handler) => {
-      if (!currentReflectionFrame()) return handler(request)
+      const frame = currentReflectionFrame()
+      if (!frame || frame.context.enhancementUnavailable) return handler(request)
       const bodies = await collectBodies(request.messages, dereference)
-      if (bodies.size === 0) return handler(request)
+      const completed = currentReflectionFrame()?.context.analysisCompleted === true
+      if (bodies.size === 0 && !completed) return handler(request)
+      if (completed) return handler({ ...request, messages: [
+        new SystemMessage('本稳定主请求已完成一次反思分析（含无新教训）；恢复或模型切换不重置 episode。只在新的失败、用户纠正或来源证据版本变化时再分析；继续原任务，不重复起草。'),
+        ...request.messages.map(m => cloneMessage(m, bodies)),
+      ] })
       const messages = request.messages.map((m) => cloneMessage(m, bodies))
       return handler({ ...request, messages })
     },
