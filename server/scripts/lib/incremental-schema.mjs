@@ -17,8 +17,8 @@
 // 18→19 #1046 durable background_execs + #1055 Skill 市场三表（均 additive：background_execs /
 // skill_packages/skill_files/skill_enablements）。
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
-// 草稿链路四表（additive）。
-export const SCHEMA_VERSION = 20
+// 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
+export const SCHEMA_VERSION = 21
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -838,6 +838,7 @@ CREATE TABLE IF NOT EXISTS "reflection_presentations" (
     "status" TEXT NOT NULL DEFAULT 'active',
     "messageId" TEXT,
     "ackSeq" INTEGER,
+    "ackTurn" INTEGER,
     "ackedAt" DATETIME,
     "revokedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -866,6 +867,75 @@ CREATE INDEX IF NOT EXISTS "reflection_presentations_ownerId_draftId_idx" ON "re
 CREATE INDEX IF NOT EXISTS "reflection_presentations_sessionId_idx" ON "reflection_presentations"("sessionId");
 CREATE INDEX IF NOT EXISTS "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
 `)
+
+  // 20→21 #1081（RF-T05）正式记录四表（additive；DDL 镜像 prisma/init.sql）。
+  // 记录不建 sessions 外键：来源会话删除不级联删除已提交结论（父规格 I3）。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "reflection_records" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "contentJson" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "evidenceStatus" TEXT NOT NULL DEFAULT 'valid',
+    "currentRevision" INTEGER NOT NULL DEFAULT 1,
+    "generation" INTEGER NOT NULL DEFAULT 1,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_revisions" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "recordId" TEXT NOT NULL,
+    "version" INTEGER NOT NULL,
+    "bodyJson" TEXT NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "evidenceJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_revisions_recordId_fkey" FOREIGN KEY ("recordId") REFERENCES "reflection_records" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_grants" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "confirmationMessageId" TEXT NOT NULL,
+    "displayId" TEXT NOT NULL,
+    "draftId" TEXT NOT NULL,
+    "draftVersion" INTEGER NOT NULL,
+    "bodyHash" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "ackSeq" INTEGER NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "submissions" INTEGER NOT NULL DEFAULT 0,
+    "status" TEXT NOT NULL DEFAULT 'active',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "consumedAt" DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_idempotency" (
+    "key" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "recordId" TEXT NOT NULL,
+    "resultJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS "reflection_records_ownerId_status_idx" ON "reflection_records"("ownerId", "status");
+CREATE INDEX IF NOT EXISTS "reflection_records_ownerId_updatedAt_idx" ON "reflection_records"("ownerId", "updatedAt");
+CREATE UNIQUE INDEX IF NOT EXISTS "reflection_revisions_recordId_version_key" ON "reflection_revisions"("recordId", "version");
+CREATE UNIQUE INDEX IF NOT EXISTS "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");
+CREATE INDEX IF NOT EXISTS "reflection_grants_ownerId_draftId_status_idx" ON "reflection_grants"("ownerId", "draftId", "status");
+CREATE INDEX IF NOT EXISTS "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
+`)
+
+  // 20→21：v20 库的 reflection_presentations 已存在（旧 CREATE 无 ackTurn）——补列。
+  const presentationColumns = db.prepare(`PRAGMA table_info("reflection_presentations")`).all()
+  if (!presentationColumns.some((c) => c.name === 'ackTurn')) {
+    db.exec('ALTER TABLE "reflection_presentations" ADD COLUMN "ackTurn" INTEGER')
+  }
 }
 
 // baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。

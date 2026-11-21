@@ -102,9 +102,9 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
     expect(row?.startCp).toBe(4)
     expect(row?.endCp).toBe(points.length)
 
-    // 没有展示 → 明确 not_ready（没有展示不能 confirm）。
+    // 没有用户自然语言确认（无可信确认消息）→ confirmation_required；未确认草稿不进入正式记录。
     const noDisplay = await runtime.service.execute(leader(), { operation: 'commit', draft_id: draft.draft_id, version: draft.version })
-    expect(noDisplay.error?.code).toBe('not_ready')
+    expect(noDisplay.error?.code).toBe('confirmation_required')
   })
 
   it('摘录与原文不匹配 → 明确拒绝，不创建草稿', async () => {
@@ -150,7 +150,7 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
 
     const commit = await runtime.service.execute(leader('run-abc'), { operation: 'commit', draft_id: draft.draft_id, version: draft.version })
     expect(commit.outcome).toBe('failure')
-    expect(commit.error?.code).toBe('not_ready')
+    expect(commit.error?.code).toBe('confirmation_required')
   })
 
   it('recordTurn 接缝：在飞证据落行后转 valid、草稿转 pending；ack 前不可用', async () => {
@@ -339,8 +339,8 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
   })
 })
 
-// fresh（init.sql，prisma migrate diff 派生物）与增量镜像（runIncrementalSchema）四表列集/索引一致。
-describe('#1080 reflections 四表 parity（fresh vs 增量）', () => {
+// fresh（init.sql，prisma migrate diff 派生物）与增量镜像（runIncrementalSchema）反射表列集/索引一致。
+describe('#1080/#1081 reflections 表 parity（fresh vs 增量）', () => {
   it('两路径列集与索引相同（镜像漂移即红）', async () => {
     const { runIncrementalSchema } = await import('../scripts/lib/incremental-schema.mjs')
     const dir = mkdtempSync(path.join(tmpdir(), `rf-parity-${process.pid}-`))
@@ -351,7 +351,17 @@ describe('#1080 reflections 四表 parity（fresh vs 增量）', () => {
       up.exec(`CREATE TABLE "users" ("id" TEXT NOT NULL PRIMARY KEY, "username" TEXT NOT NULL)`)
       runIncrementalSchema(up)
       runIncrementalSchema(up) // 幂等二跑
-      for (const table of ['reflection_drafts', 'reflection_evidence', 'reflection_presentations', 'reflection_events']) {
+      for (const table of [
+        'reflection_drafts',
+        'reflection_evidence',
+        'reflection_presentations',
+        'reflection_events',
+        // #1081 RF-T05 正式记录/授权/幂等四表 + presentations.ackTurn 补列
+        'reflection_records',
+        'reflection_revisions',
+        'reflection_grants',
+        'reflection_idempotency',
+      ]) {
         const a = fresh.prepare(`PRAGMA table_info("${table}")`).all()
         const b = up.prepare(`PRAGMA table_info("${table}")`).all()
         expect(b, table).toEqual(a)
