@@ -361,10 +361,10 @@ jobs:
           # 链路。gzip 已预装在 GitHub runner 和部署宿主；docker load 接收解压后的 tar。
           if docker save "$SERVER_IMAGE:latest" "$SERVER_IMAGE:$IMAGE_TAG" \
               | gzip -1 \
-              | timeout 900 ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'gzip -d | docker load'; then
+              | timeout 1800 ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'gzip -d | docker load'; then
             echo "[cd] server image loaded on host ✓"
           else
-            echo "[cd] ERROR: server image compressed transfer failed or exceeded 15m" >&2
+            echo "[cd] ERROR: server image compressed transfer failed or exceeded 30m" >&2
             exit 1
           fi
           ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" \

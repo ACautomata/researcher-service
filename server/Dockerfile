@@ -49,7 +49,11 @@ WORKDIR /app
 
 # 生产依赖独立安装（--omit=dev），避免 COPY build 的 node_modules 带入 devDeps 测试栈。
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev \
+    && apt-get update \
+    && apt-get purge -y --auto-remove build-essential python3 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # 编译产物 + prisma generate 生成物（tsc 编译产物树含 dist/server/src/generated，显式双拷贝
 # 保证完整；client 纯 JS，体积可忽略）。schema/scripts 供 entrypoint 幂等落表。
