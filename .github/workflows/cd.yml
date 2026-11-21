@@ -12,7 +12,7 @@
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时拉面板镜像复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 # 宿主→GHCR 拉大层阵发 EOF 时（2026-11-21 事故）自动降级为 runner 直传：runner 从 GHCR 拉本 run
-# 刚推送的镜像 → docker save → SSH → 宿主 docker load，部署不再依赖宿主到 GHCR 的 blob 链路。
+# 刚推送的镜像 → 压缩 docker save → SSH → 宿主 docker load，部署不再依赖宿主到 GHCR 的 blob 链路。
 #
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
@@ -267,7 +267,7 @@ jobs:
         # 2026-11-21 部署事故：宿主→GHCR 大 blob（package.json 改动后重建的 332.9MB npm ci 层）
         # 连续多次在接近 100% 时 unexpected EOF；Docker 层下载无断点续传，重试即整层重来，30m
         # 内永远拉不完。故本步骤失败不再直接红：下面的 fallback 步骤由 runner 直传
-        # （docker pull → docker save → SSH → docker load），部署不再依赖宿主到 GHCR 的 blob 链路。
+        # （docker pull → 压缩 docker save → SSH → docker load），部署不再依赖宿主到 GHCR 的 blob 链路。
         # 仍先试 pull 的原因：正常发版的小层增量走既有路径最快，只有大层失败时才付直传的成本。
         continue-on-error: true
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
@@ -281,9 +281,9 @@ jobs:
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,GHCR_FALLBACK_USER,GHCR_FALLBACK_TOKEN
-          # 2026-11-20 #1055 后曾放宽到 30m / 6 次；2026-11-21 起失败会落到 runner 直传，
-          # 宿主拉大层的预算不必再撑到 30m：2 次尝试、20m 足够让正常增量（单层 ~3-8m）拉完。
-          command_timeout: 20m
+          # 2026-11-20 #1055 后曾放宽到 30m / 6 次；失败会落到 runner 直传，
+          # 这里只给宿主一次短尝试，避免远端 GHCR 卡住后再浪费半小时。
+          command_timeout: 5m
           script: |
             set -euo pipefail
 
@@ -329,10 +329,10 @@ jobs:
             fi
 
       - name: Preload server image over SSH (pull fallback)
-        # runner → GHCR 走 GitHub 内网/高速路径（镜像刚由本 run 推送），再把镜像 docker save
+        # runner → GHCR 走 GitHub 内网/高速路径（镜像刚由本 run 推送），再把压缩后的镜像流
         # 经 SSH 灌给宿主 docker load。宿主已缓存的层也会随 tar 一起传输（docker save 不能
-        # 只导缺失层），所以本步骤只在 pull 失败时才跑；一次成功后同 package.json 的后续发版
-        # 层 digest 稳定（实测复用），正常增量仍走上方 pull、不付这份传输成本。
+        # 只导缺失层），压缩可显著降低宝塔宿主到 runner 的 SSH 传输量；本步骤只在 pull
+        # 失败时才跑，正常增量仍走上方 pull、不付这份传输成本。
         if: steps.pull.outcome == 'failure'
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -357,24 +357,18 @@ jobs:
           # 拉精确 sha tag（避免 latest 漂移），并补上 compose .env 实际引用的 :latest。
           docker pull "$SERVER_IMAGE:$IMAGE_TAG"
           docker tag "$SERVER_IMAGE:$IMAGE_TAG" "$SERVER_IMAGE:latest"
-          ok=0
-          for attempt in 1 2 3; do
-            # timeout 兜底：链路“慢但不死”时 ServerAlive 不会触发，单次传输给 30m 上限再重试。
-            if docker save "$SERVER_IMAGE:latest" "$SERVER_IMAGE:$IMAGE_TAG" \
-                | timeout 1800 ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'docker load'; then
-              ok=1
-              break
-            fi
-            echo "[cd] server image transfer attempt $attempt failed, retrying in 20s ..." >&2
-            sleep 20
-          done
-          if [ "$ok" != "1" ]; then
-            echo "[cd] ERROR: server image direct transfer failed after 3 attempts" >&2
+          # gzip -1 保持 runner CPU 开销低，同时避免把约 333 MB npm 层原样推过慢的 SSH
+          # 链路。gzip 已预装在 GitHub runner 和部署宿主；docker load 接收解压后的 tar。
+          if docker save "$SERVER_IMAGE:latest" "$SERVER_IMAGE:$IMAGE_TAG" \
+              | gzip -1 \
+              | timeout 900 ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" 'gzip -d | docker load'; then
+            echo "[cd] server image loaded on host ✓"
+          else
+            echo "[cd] ERROR: server image compressed transfer failed or exceeded 15m" >&2
             exit 1
           fi
           ssh "${ssh_opts[@]}" "$REMOTE_USER@$REMOTE_HOST" \
             "docker image inspect '$SERVER_IMAGE:latest' >/dev/null"
-          echo "[cd] server image loaded on host ✓"
 
       - name: Retry pull after preload
         # 直传只兜 server；frontend / searxng 的新层仍走宿主 pull（正常只有几 MB 的小层）。
