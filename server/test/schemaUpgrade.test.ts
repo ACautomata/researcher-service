@@ -14,7 +14,7 @@ function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
     // better-sqlite3 命名参数经对象绑定（$name）；表/索引名来自上方常量数组，无注入面。
-    for (const table of ['text_trace_logs', 'figures', 'background_execs', 'history_request_budgets']) {
+    for (const table of ['text_trace_logs', 'figures', 'background_execs', 'history_request_budgets', 'reflection_episodes']) {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=$name").get({ name: table }),
       ).toEqual({ name: table })

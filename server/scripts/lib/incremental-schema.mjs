@@ -19,9 +19,20 @@
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
 // 21→22 #1082 RF-T06 记录检索额度账本 + #1084 RF-T08 证据失效两表（均 additive）。
-export const SCHEMA_VERSION = 22
+export const SCHEMA_VERSION = 23
 
 export function runIncrementalSchema(db) {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "reflection_episodes" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "requestId" TEXT NOT NULL,
+    "draftId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS "reflection_episodes_ownerId_requestId_idx" ON "reflection_episodes"("ownerId", "requestId");
+  `)
   db.exec(`
 -- CreateTable
 CREATE TABLE IF NOT EXISTS "background_execs" (

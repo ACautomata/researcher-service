@@ -1,6 +1,6 @@
 import { createSessionHistoryTool, runWithHistoryContext } from '../historyTool'
 import type { HistoryRuntimePort } from '../../sessions/history/model'
-import { createReflectionTool } from '../reflectionTool'
+import { REFLECTION_GUIDANCE_VERSION, createReflectionTool } from '../reflectionTool'
 import { createReflectionConfirmationClassifier } from '../reflectionConfirmation'
 import { runWithReflectionContext, type ReflectionRunContext } from '../reflectionFrame'
 import { createReflectionDereferenceMiddleware } from '../reflectionDereference'
@@ -1364,6 +1364,7 @@ export class RunService {
                 currentSessionId: cmd.sessionId,
                 role: 'leader',
                 runId: cmd.runId,
+                historyEvidence: new Set<string>(),
                 ...(reflectionTriggerMessageId ? { triggerMessageId: reflectionTriggerMessageId, requestId: reflectionTriggerMessageId } : {}),
                 ...(reflectionManagementIntent ? { managementIntent: true } : {}),
               },
@@ -1373,6 +1374,15 @@ export class RunService {
               authorizedDrafts: new Set<string>(),
             }
           : undefined
+        if (reflectionFrameLocal) {
+          try {
+            const analysisCompleted = await this.deps.reflections!.analysisCompleted(reflectionFrameLocal.context)
+            Object.assign(reflectionFrameLocal.context, { analysisCompleted })
+          } catch {
+            // 元数据不可恢复时停止增强，原任务继续；不能重发反思 episode。
+            Object.assign(reflectionFrameLocal.context, { enhancementUnavailable: true })
+          }
+        }
         reflectionFrame = reflectionFrameLocal
         const withReflection = <T>(fn: () => Promise<T>): Promise<T> =>
           reflectionFrameLocal ? runWithReflectionContext(reflectionFrameLocal, fn) : fn()
@@ -1547,6 +1557,10 @@ export class RunService {
       this.writeLocks.releaseRun(cmd.runId)
       // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
       const finalState = this.runs.get(cmd.sessionId)?.state
+      if (finalState === 'completed' && reflectionFrame && !reflectionFrame.context.enhancementUnavailable && this.deps.reflections) {
+        try { await this.deps.reflections.completeAnalysis(reflectionFrame.context) }
+        catch { console.warn('[runner] reflection episode completion unavailable') }
+      }
       // teammate 状态归位（executeRun finally 与 executeNow pre-start catch 共用 settleTeammateStatus）
       await this.settleTeammateStatus(cmd, finalState ?? 'failed')
       if (
@@ -2281,7 +2295,7 @@ export class RunService {
     // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
     // skill 目录版本入键（#1057）：启用集已在 capabilities.key（enabledSkillIds 并入），
     // 版本管「开着的 skill 长什么样」（id/name/sha256 稳定序 sha256）。
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}|history:${this.deps.history && historyLeader ? 'leader-v1' : 'none'}|reflections:${this.deps.reflections && reflectionsLeader ? 'leader-v1' : 'none'}`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}|${skillCatalogVersion || 'none'}|core:${tools.map(t => t.name).sort().join(',')}|history:${this.deps.history && historyLeader ? 'leader-v1' : 'none'}|reflections:${this.deps.reflections && reflectionsLeader ? `leader:${REFLECTION_GUIDANCE_VERSION}` : 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     // #782 × #785 接缝：journaling 开启时 backendFor 产出打点装饰器（其 apply 经 putBuffer

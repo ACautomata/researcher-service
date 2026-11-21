@@ -43,6 +43,7 @@ import type {
   ReflectionStore,
   ReflectionEvidencePort,
   RecordDetail,
+  ReflectionTarget,
   RecordEvidenceRecord,
   RecordTargetResult,
   ReflectionQueryLease,
@@ -54,6 +55,7 @@ import { ReflectionCursorStore, type ReflectionCursorState, type SnapshotEntry, 
 import { ReflectionRecordsSchema, type ReflectionRequest } from './params'
 import {
   REFLECTION_CATEGORY_LABELS,
+  REFLECTION_LIMITS,
   REFLECTION_CONFIRMATION_DECISIONS,
   REFLECTION_EVIDENCE_STATES,
   REFLECTION_RETRIEVAL,
@@ -136,6 +138,7 @@ export class ReflectionService {
     const operation = parsed.success ? parsed.data.operation : 'unknown'
     let result: ReflectionResult
     if (context.role !== 'leader') result = failure('permission', 'leader_only', '反思记录仅供 Leader 使用', operation)
+    else if (context.enhancementUnavailable) result = failure('system', 'system_error', '反思元数据不可恢复，本请求已停止增强，原任务可继续', operation)
     else if (!parsed.success) result = failure('parameter', 'invalid_parameters', '反思工具参数无效', operation)
     else if (signal?.aborted) result = failure('limit', 'cancelled', '反思操作已取消', operation)
     else {
@@ -150,12 +153,12 @@ export class ReflectionService {
           result = failure('system', 'system_error', '反思操作失败', operation)
         }
         result = this.fitToCallBytes(result, operation)
-        if (!await this.settleBudget(budget.request, result, started)) {
+        if (!await this.settleBudget(budget.request, result, started) && !(operation === 'commit' && result.outcome === 'success')) {
           result = { ...failure('system', 'system_error', '反思记录检索计量不可用，已停止本次交付', operation), progress: 'stopped' }
         }
       }
     }
-    if (signal?.aborted) result = failure('limit', 'cancelled', '反思操作已取消', operation)
+    if (signal?.aborted && !(operation === 'commit' && result.outcome === 'success')) result = failure('limit', 'cancelled', '反思操作已取消', operation)
     try {
       await this.options.events?.record({
         ownerId: context.ownerId,
@@ -276,7 +279,7 @@ export class ReflectionService {
       case 'read': return this.read(context, request, signal, remainingWaitMs)
       case 'draft': return this.draft(context, request, signal)
       case 'present': return this.present(context, request)
-      case 'commit': return this.commit(context, request)
+      case 'commit': return this.commit(context, request, signal)
       case 'cancel': return this.cancel(context, request)
       default: return failure('parameter', 'invalid_parameters', '未知反思操作', 'unknown')
     }
@@ -717,7 +720,7 @@ export class ReflectionService {
     for (const target of targets) {
       const record = await this.store.getRecord(context.ownerId, target.record_id, target.version)
       // 不存在/越权/experience 下不可主动使用：同形 not_found（#1084 读门防探测）。
-      if (!record || (request.purpose === 'experience' && (record.status !== 'active' || record.evidenceStatus !== 'valid'))) {
+      if (!record || (request.purpose === 'experience' && (record.status !== 'active' || record.evidenceStatus !== 'valid' || (target.version !== undefined && target.version !== record.currentRevision)))) {
         out.push({ record_id: target.record_id, status: 'not_found' })
         continue
       }
@@ -809,6 +812,9 @@ export class ReflectionService {
   }
 
   private async draft(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'draft' }>, signal?: AbortSignal): Promise<ReflectionResult> {
+    const previous = request.draft_id ? await this.store.getDraft(context.ownerId, request.draft_id) : null
+    const action = previous?.targets?.length ? previous.action : request.action
+    const requestedTargets = request.targets ?? previous?.targets ?? []
     let normalized: ReturnType<typeof normalizeDraftInput>
     try {
       normalized = normalizeDraftInput({
@@ -834,15 +840,60 @@ export class ReflectionService {
       }
       evidence.push(record.record)
     }
+    // 去重原始来源并重映射原因索引；保留每条源记录的关系由 targets 快照承担。
+    const remap = new Map<number, number>()
+    const unique: EvidenceRecord[] = []
+    const evidenceKey = (e: EvidenceRecord) => JSON.stringify([e.sessionId, e.messageId, e.runId, e.toolCallId, e.region, e.startCp, e.endCp, e.contentVersion])
+    for (const e of evidence) {
+      const previous = unique.find(u => evidenceKey(u) === evidenceKey(e))
+      const position = previous?.position ?? unique.length + 1
+      remap.set(e.position, position)
+      if (!previous) unique.push({ ...e, position })
+    }
+    evidence.splice(0, evidence.length, ...unique)
+    normalized = { ...normalized, body: { ...normalized.body, causes: normalized.body.causes.map(c => ({ ...c, evidence: [...new Set(c.evidence.map(p => remap.get(p)!))] })) } }
+    const targets: ReflectionTarget[] = []
+    for (const target of requestedTargets) {
+      const record = await this.store.getRecord(context.ownerId, target.record_id)
+      if (!record || record.status === 'deleted') return failure('parameter', 'not_found', '目标不存在', 'draft')
+      if (record.currentRevision !== target.version || record.status === 'superseded') {
+        return { ...failure('conflict', 'conflict', '目标基准已变化，请管理读取最新版本后重新比较并起草', 'draft'), differences: [{ record_id: target.record_id, expected_version: target.version, actual_version: record.currentRevision, status: record.status }] }
+      }
+      // merge/replace 不能洗白失效证据；review/revise 必须使用重新核验的剩余或补充原始证据。
+      if (action !== 'review' && record.evidenceStatus !== 'valid') return failure('conflict', 'not_ready', '来源经验待复核，不能合并或替代为有效经验', 'draft')
+      if (['merge', 'replace', 'revise', 'review'].includes(action)) {
+        // 只继承经原始消息核验的结构化来源，旧结论正文不能充当证据。
+        for (const original of record.evidence) {
+          if (original.status !== 'valid' && action === 'review') continue
+          if (original.status !== 'valid') return failure('conflict', 'not_ready', '来源证据失效，先复核再合并', 'draft')
+          const duplicate = evidence.some(e => e.sessionId === original.sessionId && e.messageId === original.messageId && e.region === original.region && e.toolCallId === original.toolCallId && e.startCp === original.startCp && e.endCp === original.endCp && e.contentVersion === original.contentVersion)
+          if (!duplicate) evidence.push({ ...original, position: evidence.length + 1, runId: null, status: 'valid' })
+        }
+      }
+      const snapshot = { record_id: target.record_id, version: target.version, generation: record.generation, status: record.status, evidence_status: record.evidenceStatus, evidence_hash: sha256(JSON.stringify(record.evidence)) }
+      if ('generation' in target && JSON.stringify(snapshot) !== JSON.stringify(target)) return failure('conflict', 'conflict', '旧动作基准已变化，请创建新草稿并重新确认', 'draft')
+      targets.push(snapshot)
+    }
+    if (evidence.length > REFLECTION_LIMITS.evidencePerDraft) return failure('limit', 'limit', '保留全部来源后超过 8 条证据，请缩小变更范围', 'draft')
+    if (utf8Bytes(presentationJson({ body: normalized.body, evidence, version: (previous?.version ?? 0) + 1, action, targets })) > REFLECTION_LIMITS.bodyBytes) return failure('limit', 'limit', '完整操作超过正文上限，请缩小变更范围', 'draft')
+    if (evidence.length > REFLECTION_RETRIEVAL.evidenceVerificationsPerCall) return failure('limit', 'limit', '合并来源证据超过单次核验上限', 'draft')
     const status = evidence.every((e) => e.status === 'valid') ? 'pending' : 'preparing'
-    const created = request.action === 'create'
+    const created = request.action === 'create' || request.targets !== undefined
       ? await this.store.createDraft({
           ownerId: context.ownerId,
           sessionId: context.currentSessionId,
           body: normalized.body,
           evidence,
           status,
-          action: 'create',
+          action: request.action,
+          targets,
+          ...(context.requestId ? { episode: {
+            requestId: context.requestId,
+            id: sha256(JSON.stringify([context.ownerId, context.requestId, request.category,
+              normalized.body.problem.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(),
+              evidence.map(e => [e.sessionId, e.messageId, e.region, e.contentVersion]).sort(), targets,
+            ])),
+          } } : {}),
         })
       : await this.store.reviseDraft({
           ownerId: context.ownerId,
@@ -873,8 +924,8 @@ export class ReflectionService {
         })),
       },
       ...(normalized.redactions > 0 ? { redactions: normalized.redactions } : {}),
-      status,
-      confirmable: status === 'pending',
+      status: created.alreadyAnalyzed ? 'already_analyzed' : status,
+      confirmable: created.status === 'pending',
     }, DRAFT_GUIDANCE)
   }
 
@@ -887,8 +938,8 @@ export class ReflectionService {
     const display = item.displayExcerpt ?? item.excerpt
     // 可信当前证据端口只读本人当前主线程（#1080 AC / 父规格 I4）——历史证据须走
     // session_history 的读取边界，不在这里放宽成任意会话可读。
-    if (sessionId !== context.currentSessionId) {
-      return { error: { code: 'invalid_evidence', message: `证据 ${position} 只允许引用当前会话` } }
+    if (sessionId !== context.currentSessionId && (item.message_id === undefined || !context.historyEvidence?.has(`${sessionId}:${item.message_id}`))) {
+      return { error: { code: 'invalid_evidence', message: `证据 ${position} 历史来源须有稳定消息引用` } }
     }
 
     if (item.message_id !== undefined) {
@@ -954,9 +1005,10 @@ export class ReflectionService {
     const blocked = blockedDraftExcerpts(draft.evidence)
     const shownBody = scrubDraftBody(draft.body, blocked)
     const bodyJson = scrubBodyJson(
-      presentationJson({ body: draft.body, evidence: draft.evidence, version: draft.version, action: draft.action }),
+      presentationJson({ body: draft.body, evidence: draft.evidence, version: draft.version, action: draft.action, targets: draft.targets }),
       blocked,
     )
+    if (utf8Bytes(bodyJson) > REFLECTION_LIMITS.bodyBytes) return failure('limit', 'limit', '完整操作超过展示上限，请缩小草稿后重新展示', 'present')
     const bodyHash = sha256(bodyJson)
     await this.store.revokePresentations(context.ownerId, draft.id)
     const presentation = await this.store.createPresentation({
@@ -991,7 +1043,7 @@ export class ReflectionService {
     }, '已生成展示。用户须在聊天中看到该版本后用自然语言确认；展示未绑定终态消息前不可保存。')
   }
 
-  private async commit(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'commit' }>): Promise<ReflectionResult> {
+  private async commit(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'commit' }>, signal?: AbortSignal): Promise<ReflectionResult> {
     const draft = await this.store.getDraft(context.ownerId, request.draft_id)
     if (!draft) return failure('parameter', 'not_found', '草稿不存在', 'commit')
     if (draft.version !== request.version) return failure('conflict', 'conflict', '草稿版本已变化', 'commit')
@@ -1002,7 +1054,7 @@ export class ReflectionService {
     // 确认消息活跃性、展示绑定、授权状态与幂等结果均在 commitGrant 事务内 CAS 复核：
     // 已提交的幂等重试先命中幂等结果（即使确认消息后来被撤回/回退也返回原结果）。
     // 提交前再次复核来源（I4）：失效即拒绝，不把过期证据当作可确认版本。
-    const stale = await this.reverifyEvidence(context, draft)
+    const stale = draft.status === 'committed' ? null : await this.reverifyEvidence(context, draft)
     if (stale !== null) {
       await this.store.invalidateVersion(context.ownerId, draft.id, draft.version, stale)
       await this.store.revokeActiveGrants(context.ownerId, draft.id)
@@ -1014,9 +1066,11 @@ export class ReflectionService {
       draftId: draft.id,
       draftVersion: draft.version,
       now: new Date(this.clock()),
+      ...(signal ? { signal } : {}),
     })
     if ('error' in outcome) {
       switch (outcome.error) {
+        case 'cancelled': return failure('limit', 'cancelled', '提交已取消', 'commit')
         case 'expired':
           return failure('conflict', 'expired', '确认授权已过窗，请重新展示最新版本并再次确认', 'commit')
         case 'revoked':
@@ -1024,7 +1078,7 @@ export class ReflectionService {
         case 'limit':
           return failure('limit', 'limit', '提交次数已达上限，请重新展示并确认', 'commit')
         case 'conflict':
-          return failure('conflict', 'conflict', '草稿或证据已变化，请重新展示并确认', 'commit')
+          return { ...failure('conflict', 'conflict', '目标、草稿或证据已变化，请读取差异基准，重新形成草稿、展示并确认', 'commit'), differences: outcome.differences }
         default:
           return failure('conflict', 'confirmation_required', '需要用户在完整展示后用自然语言确认，才能保存', 'commit')
       }
@@ -1039,7 +1093,7 @@ export class ReflectionService {
         evidence_status: outcome.result.evidenceStatus,
       },
       ...(outcome.idempotent ? { idempotent: true } : {}),
-    }, '正式反思记录已保存。后续经验检索归后续票；本票不开放主动检索。')
+    }, '正式反思记录已保存。使用前须核验当前版本、有效性及适用范围。')
   }
 
   private async cancel(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'cancel' }>): Promise<ReflectionResult> {
@@ -1074,6 +1128,7 @@ export class ReflectionService {
       draftId: p.draftId,
       version: p.draftVersion,
       action: p.action,
+      targets: draft?.targets ?? [],
       bodyHash: p.bodyHash,
       status: p.status,
       body: deleted ? null : scrubDraftBody(p.body, blocked),
@@ -1236,7 +1291,7 @@ export class ReflectionService {
   async displayBodyText(ownerId: string, displayId: string): Promise<string | null> {
     const display = await this.getDisplay(ownerId, displayId)
     if (!display || display.deleted || display.body === null) return null
-    return formatDraftBody(display.body, display.evidence, display.version)
+    return `拟执行：${display.action}\n目标基准：${JSON.stringify(display.targets ?? [])}\n` + formatDraftBody(display.body, display.evidence, display.version)
   }
 
   /** 模型输入解引用：management read 的草稿正文引用临时展开（版本须仍匹配）。 */
@@ -1270,7 +1325,7 @@ export class ReflectionService {
       if (!lease) return null
       let read: ReflectionRecordRead
       try {
-        const rows = await lease.read(context.ownerId, [{ record_id: recordId, version }], false)
+        const rows = await lease.read(context.ownerId, [{ record_id: recordId, version }], typeof contextOrOwner !== 'string' && context.managementIntent !== true)
         read = rows[0]
       } catch {
         return null
@@ -1284,7 +1339,7 @@ export class ReflectionService {
       evidenceStatus = read.evidence_status
     } else {
       const record = await this.store.getRecord(context.ownerId, recordId, version)
-      if (!record) return null
+      if (!record || (context.managementIntent !== true && typeof contextOrOwner !== 'string' && (record.status !== 'active' || record.evidenceStatus !== 'valid' || version !== record.currentRevision))) return null
       body = record.body
       evidence = record.evidence
       recordStatus = record.status
@@ -1318,6 +1373,7 @@ export interface PresentationDisplay {
   readonly draftId: string
   readonly version: number
   readonly action: string
+  readonly targets?: readonly ReflectionTarget[]
   readonly bodyHash: string
   readonly status: string
   readonly body: DraftBody | null
@@ -1440,6 +1496,7 @@ function confirmationSnapshot(candidate: ConfirmationCandidate): ConfirmationAct
     version: candidate.draft.version,
     bodyHash: candidate.presentation.bodyHash,
     action: candidate.presentation.action,
+    targets: candidate.draft.targets,
     title: candidate.draft.body.title,
     category: candidate.draft.body.category,
     evidenceCount: candidate.draft.evidence.length,

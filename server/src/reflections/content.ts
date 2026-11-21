@@ -80,6 +80,7 @@ export function normalizeDraftInput(input: {
 
   const causes: CauseAnalysis[] = []
   for (const c of input.causes) {
+    if (c.kind === 'fact' && c.evidence.length === 0) return { error: '事实原因必须关联原始证据' }
     // 关联证据位置越界即拒绝（不静默丢弃事实/推测关联）。
     for (const position of c.evidence) {
       if (position < 1 || position > input.evidence.length) return { error: '原因关联的证据位置不存在' }
@@ -341,6 +342,7 @@ export function presentationPayload(p: {
   evidence: readonly EvidenceRecord[]
   version: number
   action: string
+  targets?: readonly import('./model').ReflectionTarget[]
 }): Record<string, unknown> {
   return {
     title: p.body.title,
@@ -352,6 +354,7 @@ export function presentationPayload(p: {
     evidence: evidenceViews(p.evidence),
     version: p.version,
     action: p.action,
+    ...(p.targets?.length ? { targets: p.targets } : {}),
   }
 }
 

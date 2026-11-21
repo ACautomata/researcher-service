@@ -20,6 +20,7 @@ import type {
   ReflectionStore,
   ReflectionTriggerMessage,
   RecordDetail,
+  ReflectionTarget,
 } from './model'
 import type { ReflectionDraftStatus, ReflectionPresentationStatus, ReflectionRegion } from './values'
 
@@ -63,6 +64,7 @@ interface DraftRowLike {
   status: string
   action: string
   contentJson: string
+  targetsJson?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -109,6 +111,7 @@ function draftOf(row: DraftRowLike, evidence: readonly EvidenceRowLike[]): Draft
     version: row.version,
     status: row.status as ReflectionDraftStatus,
     action: row.action,
+    targets: JSON.parse(row.targetsJson ?? '[]'),
     body: parseBody(row.contentJson),
     evidence: evidenceOf(evidence),
     createdAt: row.createdAt.toISOString(),
@@ -116,16 +119,9 @@ function draftOf(row: DraftRowLike, evidence: readonly EvidenceRowLike[]): Draft
   }
 }
 
-export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidencePort {
-  constructor(
-    private readonly prisma: PrismaClient,
-    private readonly options: {
-      /** 故障注入（RF18）：事件写失败必须整笔回滚，不得留下半套正式结果。 */
-      failEventWrite?: (action: string) => boolean
-    } = {},
-  ) {}
-
-  // ---- 可信当前证据端口 ----
+// 事务客户端与普通读客户端共用相同原始产品投影读取；无需把事务强转完整 PrismaClient。
+class PrismaReflectionEvidence implements ReflectionEvidencePort {
+  constructor(private readonly prisma: Pick<PrismaClient, 'session' | 'sessionMessage'>) {}
 
   async read(context: ReflectionContext, sessionId: string, messageId: string): Promise<EvidenceSource | null> {
     // 已持久证据只读本人主线程会话；草稿阶段「只能引用当前会话」的边界在 service.resolveEvidence，
@@ -185,6 +181,44 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     }
   }
 
+}
+
+export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidencePort {
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly options: {
+      /** 故障注入（RF18）：事件写失败必须整笔回滚，不得留下半套正式结果。 */
+      failEventWrite?: (action: string) => boolean
+      /** 事务前屏障：验证独立连接与提交的真实交错；不替换 repository 或 SQLite。 */
+      beforeCommitTransaction?: () => Promise<void>
+      failEpisodeRead?: () => boolean
+    } = {},
+  ) {}
+
+  // ---- 可信当前证据端口 ----
+
+  read(context: ReflectionContext, sessionId: string, messageId: string): Promise<EvidenceSource | null> {
+    return new PrismaReflectionEvidence(this.prisma).read(context, sessionId, messageId)
+  }
+
+  readRegion(context: ReflectionContext, sessionId: string, messageId: string, region: ReflectionRegion, toolCallId?: string): Promise<EvidenceSource | null> {
+    return new PrismaReflectionEvidence(this.prisma).readRegion(context, sessionId, messageId, region, toolCallId)
+  }
+
+  async analysisCompleted(context: ReflectionContext): Promise<boolean> {
+    if (this.options.failEpisodeRead?.()) throw new Error('episode metadata unavailable')
+    if (!context.requestId || context.role !== 'leader') return false
+    return (await this.prisma.reflectionEpisode.count({ where: { ownerId: context.ownerId, sessionId: context.currentSessionId, requestId: context.requestId, draftId: null } })) > 0
+  }
+
+  async completeAnalysis(context: ReflectionContext): Promise<void> {
+    if (!context.requestId || context.role !== 'leader') return
+    const id = sha256(JSON.stringify(['completed', context.ownerId, context.requestId]))
+    await this.prisma.reflectionEpisode.upsert({ where: { id }, update: {}, create: {
+      id, ownerId: context.ownerId, sessionId: context.currentSessionId, requestId: context.requestId,
+    } })
+  }
+
   // ---- 草稿 ----
 
   async createDraft(p: {
@@ -194,8 +228,18 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     evidence: readonly EvidenceRecord[]
     status: ReflectionDraftStatus
     action: string
+    targets?: readonly ReflectionTarget[]
+    episode?: { id: string; requestId: string }
   }): Promise<DraftRecord> {
     const created = await this.prisma.$transaction(async (tx) => {
+      if (p.episode) {
+        const episode = await tx.reflectionEpisode.findUnique({ where: { id: p.episode.id } })
+        if (episode) {
+          const previous = await tx.reflectionDraft.findFirst({ where: { id: episode.draftId ?? '', ownerId: p.ownerId } })
+          if (!previous) throw new Error('episode reference unavailable')
+          return { ...previous, alreadyAnalyzed: true }
+        }
+      }
       const draft = await tx.reflectionDraft.create({
         data: {
           ownerId: p.ownerId,
@@ -203,15 +247,19 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           version: 1,
           status: p.status,
           action: p.action,
+          targetsJson: JSON.stringify(p.targets ?? []),
           title: p.body.title,
           category: p.body.category,
           contentJson: JSON.stringify(p.body),
         },
       })
       await insertEvidenceRows(tx, p.ownerId, draft.id, draft.version, p.evidence)
-      return draft
+      if (p.episode) await tx.reflectionEpisode.create({ data: {
+        id: p.episode.id, ownerId: p.ownerId, sessionId: p.sessionId, requestId: p.episode.requestId, draftId: draft.id,
+      } })
+      return { ...draft, alreadyAnalyzed: false }
     })
-    return draftOf(created, await this.evidenceRows(created.id, created.version))
+    return { ...draftOf(created, await this.evidenceRows(created.id, created.version)), alreadyAnalyzed: created.alreadyAnalyzed }
   }
 
   async getDraft(ownerId: string, draftId: string): Promise<DraftRecord | null> {
@@ -246,7 +294,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         data: {
           version,
           status: p.status,
-          action: 'revise',
+          action: current.targetsJson && current.targetsJson !== '[]' ? current.action : 'revise',
           title: p.body.title,
           category: p.body.category,
           contentJson: JSON.stringify(p.body),
@@ -259,7 +307,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         data: { status: 'revoked' },
       })
       await tx.reflectionPresentation.updateMany({
-        where: { ownerId: p.ownerId, draftId: current.id, status: 'active' },
+        where: { ownerId: p.ownerId, draftId: current.id, status: { in: ['active', 'acked'] } },
         data: { status: 'revoked', revokedAt: new Date() },
       })
       return updated
@@ -617,6 +665,35 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     return rows.map((r) => r.content).reverse()
   }
 
+  private async targetDifferences(tx: ReflectionTx, ownerId: string, targets: readonly ReflectionTarget[]): Promise<unknown[]> {
+    const differences: unknown[] = []
+    for (const target of targets) {
+      const row = await tx.reflectionRecord.findFirst({ where: { id: target.record_id, ownerId } })
+      const actual = row ? await this.recordDetail(tx, row) : null
+      if (!actual || actual.currentRevision !== target.version || actual.generation !== target.generation ||
+          actual.status !== target.status || actual.evidenceStatus !== target.evidence_status ||
+          sha256(JSON.stringify(actual.evidence)) !== target.evidence_hash) {
+        differences.push({ record_id: target.record_id, expected_version: target.version,
+          actual_version: actual?.currentRevision ?? null, expected_generation: target.generation,
+          actual_generation: actual?.generation ?? null, status: actual?.status ?? 'unreadable',
+          evidence_status: actual?.evidenceStatus ?? 'unreadable' })
+      }
+    }
+    return differences
+  }
+
+  private async validEvidence(tx: ReflectionTx, ownerId: string, sessionId: string, evidence: readonly EvidenceRecord[]): Promise<boolean> {
+    const port = new PrismaReflectionEvidence(tx)
+    for (const e of evidence) {
+      if (e.status !== 'valid' || !e.messageId) return false
+      const source = await port.readRegion({ ownerId, currentSessionId: sessionId, role: 'leader' }, e.sessionId, e.messageId, e.region, e.toolCallId ?? undefined)
+      if (!source || !source.regionPresent || !source.visible || source.contentVersion !== e.contentVersion) return false
+      // 脱敏摘录不等于原文；区域 hash 与版本仍必须完全一致。
+      if (sha256(source.regionText) !== e.regionHash) return false
+    }
+    return evidence.length > 0
+  }
+
   async issueGrant(p: {
     ownerId: string
     sessionId: string
@@ -655,11 +732,9 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           where: { id: p.candidate.draft.id, ownerId: p.ownerId, version: p.candidate.draft.version, status: 'pending' },
         })
         if (!draft) return null
-        const evidence = await tx.reflectionEvidence.findMany({
-          where: { draftId: draft.id, draftVersion: draft.version },
-          select: { status: true },
-        })
-        if (evidence.length === 0 || !evidence.every((e) => e.status === 'valid')) return null
+        if ((await this.targetDifferences(tx, p.ownerId, JSON.parse(draft.targetsJson ?? '[]'))).length) return null
+        const evidence = await tx.reflectionEvidence.findMany({ where: { draftId: draft.id, draftVersion: draft.version } })
+        if (!await this.validEvidence(tx, p.ownerId, draft.sessionId, evidenceOf(evidence))) return null
         // CAS：草稿仍 pending 才进入待保存；并发修订/取消整体失败，无部分授权。
         const moved = await tx.reflectionDraft.updateMany({
           where: { id: draft.id, ownerId: p.ownerId, version: draft.version, status: 'pending' },
@@ -697,18 +772,38 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     }
   }
 
+  private async committedOutcome(
+    client: Pick<PrismaClient, 'reflectionIdempotency' | 'reflectionGrant' | 'reflectionRecord'>,
+    p: Parameters<ReflectionStore['commitGrant']>[0],
+    key: string,
+  ): Promise<CommitOutcome | null> {
+    const existing = await client.reflectionIdempotency.findUnique({ where: { key } })
+    if (!existing) return null
+    const grant = await client.reflectionGrant.findFirst({ where: {
+      ownerId: p.ownerId, confirmationMessageId: p.confirmationMessageId, draftId: p.draftId, draftVersion: p.draftVersion,
+    } })
+    if (!grant) return { error: 'not_found' }
+    const record = await client.reflectionRecord.findFirst({ where: { id: existing.recordId, ownerId: p.ownerId, status: { not: 'deleted' } } })
+    if (!record) return { error: 'revoked' }
+    return { result: parseCommitResult(existing.resultJson), idempotent: true }
+  }
+
   async commitGrant(p: {
     ownerId: string
     confirmationMessageId: string
     draftId: string
     draftVersion: number
     now: Date
+    signal?: AbortSignal
   }): Promise<CommitOutcome> {
+    await this.options.beforeCommitTransaction?.()
+    if (p.signal?.aborted) return { error: 'cancelled' }
     const key = idempotencyKey(p.ownerId, p.confirmationMessageId)
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const existing = await tx.reflectionIdempotency.findUnique({ where: { key } })
-        if (existing) return { result: parseCommitResult(existing.resultJson), idempotent: true }
+        if (p.signal?.aborted) return { error: 'cancelled' as const }
+        const saved = await this.committedOutcome(tx, p, key)
+        if (saved) return saved
         const grant = await tx.reflectionGrant.findFirst({
           where: {
             ownerId: p.ownerId,
@@ -770,24 +865,31 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         // 正式保存的正文必须与用户实际看到的版本逐字一致（服务端重算 hash）。
         const body = parseBody(draftRow.contentJson)
         const evidence = evidenceOf(evidenceRows)
-        const bodyJson = presentationJson({ body, evidence, version: draftRow.version, action: grant.action })
+        const targets: ReflectionTarget[] = JSON.parse(draftRow.targetsJson ?? '[]')
+        const differences = await this.targetDifferences(tx, p.ownerId, targets)
+        if (differences.length) return { error: 'conflict' as const, differences }
+        // 权限、原始产品投影版本、范围 hash 都在写事务内重读，封闭事务外复核后的竞态。
+        if (!await this.validEvidence(tx, p.ownerId, draftRow.sessionId, evidence)) return { error: 'conflict' as const }
+        const bodyJson = presentationJson({ body, evidence, version: draftRow.version, action: grant.action, targets })
         const bodyHash = sha256(bodyJson)
         if (bodyHash !== grant.bodyHash) return { error: 'conflict' as const }
 
-        const revision = 1
-        const record = await tx.reflectionRecord.create({
-          data: {
-            ownerId: p.ownerId,
-            sessionId: draftRow.sessionId,
-            title: draftRow.title,
-            category: draftRow.category,
-            contentJson: draftRow.contentJson,
-            status: 'active',
-            evidenceStatus: 'valid',
-            currentRevision: revision,
-            generation: 1,
-          },
-        })
+        const modifies = targets.length === 1 && ['revise', 'review'].includes(grant.action)
+        const revision = modifies ? targets[0].version + 1 : 1
+        const data = {
+          title: draftRow.title, category: draftRow.category, contentJson: draftRow.contentJson,
+          status: modifies ? targets[0].status : 'active', evidenceStatus: 'valid', currentRevision: revision,
+        }
+        const record = modifies
+          ? await tx.reflectionRecord.update({ where: { id: targets[0].record_id }, data })
+          : await tx.reflectionRecord.create({ data: { ...data, ownerId: p.ownerId, sessionId: draftRow.sessionId, generation: 1 } })
+        // 新目标只由服务端分配，旧源不可再次充当新关系目标，因此替代/合并 DAG 构造性无环。
+        if (['replace', 'merge'].includes(grant.action)) {
+          await tx.reflectionRecord.updateMany({
+            where: { ownerId: p.ownerId, id: { in: targets.map(t => t.record_id) } },
+            data: { status: 'superseded' },
+          })
+        }
         await tx.reflectionRevision.create({
           data: {
             recordId: record.id,
@@ -845,8 +947,8 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     } catch (err) {
       // 并发重复提交：唯一约束败方读回已提交结果（结果未知后查实况）。
       if ((err as { code?: string }).code === 'P2002') {
-        const existing = await this.prisma.reflectionIdempotency.findUnique({ where: { key } })
-        if (existing) return { result: parseCommitResult(existing.resultJson), idempotent: true }
+        const saved = await this.committedOutcome(this.prisma, p, key)
+        if (saved) return saved
       }
       throw err
     }
@@ -931,6 +1033,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     status: string
     evidenceStatus: string
     currentRevision: number
+    generation: number
     createdAt: Date
     updatedAt: Date
   }, version?: number): Promise<RecordDetail> {
@@ -960,6 +1063,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     }))
     return {
       recordId: row.id,
+      generation: row.generation,
       ownerId: row.ownerId,
       sessionId: row.sessionId,
       title: revision ? body.title : row.title,
@@ -1006,9 +1110,9 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     })
     const affectedRecords = await tx.reflectionRecordEvidence.findMany({
       where: { ownerId: p.ownerId, sessionId: p.sessionId, status: 'invalid' },
-      select: { recordId: true },
+      select: { recordId: true, recordVersion: true, record: { select: { currentRevision: true } } },
     })
-    const recordIds = [...new Set(affectedRecords.map((r) => r.recordId))]
+    const recordIds = [...new Set(affectedRecords.filter(r => r.recordVersion === r.record.currentRevision).map((r) => r.recordId))]
     if (recordIds.length > 0) {
       await tx.reflectionRecord.updateMany({
         where: { ownerId: p.ownerId, id: { in: recordIds }, evidenceStatus: 'valid' },

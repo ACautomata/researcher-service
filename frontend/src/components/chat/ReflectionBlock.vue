@@ -58,7 +58,14 @@ watch(() => [props.presentation.displayId, props.presentation.version, props.mes
   await ackIfRendered()
 })
 
-const operationLabel = computed(() => (display.value?.action === 'revise' ? '修订反思草稿' : '新建反思草稿'))
+const operationLabel = computed(() => ({ create: '新建反思草稿', revise: '修订反思', replace: '替代反思', merge: '合并反思', review: '复核反思' }[display.value?.action ?? 'create'] ?? '反思操作'))
+const effect = computed(() => {
+  const action = display.value?.action
+  if (action === 'merge' || action === 'replace') return '确认后将保存为新记录，以下源记录退出主动使用。'
+  if (action === 'review') return '确认后以展示的剩余或补充原始证据保存新版本，恢复有效；旧版本仅供管理查看。'
+  if (action === 'revise' && display.value?.targets?.length) return '确认后更新同一记录的新版本，包含正文、类别及适用范围；旧版本仅供管理查看。'
+  return '确认后保存上面展示的完整版本。'
+})
 // 可确认性以服务端实时读面为准（展示 ref 里的 confirmable 是 present 时快照，核验后会过期）。
 const notConfirmable = computed(() => !(display.value?.body && (display.value?.confirmable ?? props.presentation.confirmable)))
 const evidencePending = computed(() => (display.value?.evidence ?? []).filter((e) => e.status !== 'valid'))
@@ -82,6 +89,10 @@ const evidencePending = computed(() => (display.value?.evidence ?? []).filter((e
     <div v-else-if="display.deleted" class="rf-deleted" data-test="reflection-deleted">该反思展示已删除，正文不可再读。</div>
 
     <article v-else-if="display.body" ref="bodyEl" class="rf-body" data-test="reflection-body">
+      <p class="rf-effect">{{ effect }}</p>
+      <ul v-if="display.targets?.length" data-test="reflection-targets">
+        <li v-for="target in display.targets" :key="target.record_id">记录 {{ target.record_id }} · 基准 v{{ target.version }} · {{ target.status }} / {{ target.evidence_status }}</li>
+      </ul>
       <h4 class="rf-body-title">{{ display.body.title }}</h4>
       <p class="rf-category">类别：{{ display.categoryLabel }}</p>
 

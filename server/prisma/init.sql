@@ -804,3 +804,13 @@ CREATE INDEX "reflection_request_budgets_ownerId_sessionId_idx" ON "reflection_r
 -- CreateIndex
 CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");
 
+
+CREATE TABLE IF NOT EXISTS "reflection_episodes" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "requestId" TEXT NOT NULL,
+    "draftId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS "reflection_episodes_ownerId_requestId_idx" ON "reflection_episodes"("ownerId", "requestId");

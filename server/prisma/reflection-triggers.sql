@@ -6,7 +6,13 @@
 -- outbox 清理只负责物理副本（正文/原因中逐字复制的来源文字），不承担一致性。
 --
 -- 普通追加（INSERT archivedAt IS NULL）不触发；files-only rewind 不动消息行，因此不影响纯对话证据。
--- 同一文件由 apply-schema / upgrade-schema / 测试基座共同执行（CREATE TRIGGER IF NOT EXISTS 幂等）。
+-- 同一文件由 apply-schema / upgrade-schema / 测试基座共同执行（重建触发器幂等）。
+
+-- #1083：重建旧触发器以升级到 revision 感知规则；组合根在接收请求前执行。
+DROP TRIGGER IF EXISTS "session_messages_reflection_source_update";
+DROP TRIGGER IF EXISTS "session_messages_reflection_source_delete";
+DROP TRIGGER IF EXISTS "sessions_reflection_source_delete";
+DROP TRIGGER IF EXISTS "sessions_reflection_source_visibility";
 
 -- 源消息 UPDATE：内容变化 / 产品聚合变化 / 归档（rewind 放弃路线）。
 CREATE TRIGGER IF NOT EXISTS "session_messages_reflection_source_update"
@@ -35,7 +41,7 @@ BEGIN
 
   UPDATE "reflection_records" SET "evidenceStatus" = 'review_required'
   WHERE "evidenceStatus" = 'valid'
-    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "messageId" = NEW."id" AND "status" = 'invalid');
+    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "messageId" = NEW."id" AND "status" = 'invalid' AND "recordId" = "reflection_records"."id" AND "recordVersion" = "reflection_records"."currentRevision");
 
   UPDATE "reflection_drafts" SET "status" = 'preparing'
   WHERE "status" IN ('pending', 'confirmed_pending_save')
@@ -46,11 +52,11 @@ BEGIN
 
   UPDATE "reflection_grants" SET "status" = 'revoked'
   WHERE "status" = 'active'
-    AND "draftId" IN (SELECT DISTINCT "draftId" FROM "reflection_evidence" WHERE "messageId" = NEW."id");
+    AND EXISTS (SELECT 1 FROM "reflection_evidence" "e" WHERE "e"."messageId" = NEW."id" AND "e"."draftId" = "reflection_grants"."draftId" AND "e"."draftVersion" = "reflection_grants"."draftVersion");
 
   UPDATE "reflection_presentations" SET "status" = 'revoked', "revokedAt" = CURRENT_TIMESTAMP
   WHERE "status" IN ('active', 'acked')
-    AND "draftId" IN (SELECT DISTINCT "draftId" FROM "reflection_evidence" WHERE "messageId" = NEW."id");
+    AND EXISTS (SELECT 1 FROM "reflection_evidence" "e" WHERE "e"."messageId" = NEW."id" AND "e"."draftId" = "reflection_presentations"."draftId" AND "e"."draftVersion" = "reflection_presentations"."draftVersion");
 END;
 
 -- 源消息 DELETE：recover 残留清理等直接删除路径（会话级联删除由 sessions 触发器 + 删除钩子兜底）。
@@ -77,7 +83,7 @@ BEGIN
 
   UPDATE "reflection_records" SET "evidenceStatus" = 'review_required'
   WHERE "evidenceStatus" = 'valid'
-    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "messageId" = OLD."id" AND "status" = 'invalid');
+    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "messageId" = OLD."id" AND "status" = 'invalid' AND "recordId" = "reflection_records"."id" AND "recordVersion" = "reflection_records"."currentRevision");
 
   UPDATE "reflection_drafts" SET "status" = 'preparing'
   WHERE "status" IN ('pending', 'confirmed_pending_save')
@@ -88,11 +94,11 @@ BEGIN
 
   UPDATE "reflection_grants" SET "status" = 'revoked'
   WHERE "status" = 'active'
-    AND "draftId" IN (SELECT DISTINCT "draftId" FROM "reflection_evidence" WHERE "messageId" = OLD."id");
+    AND EXISTS (SELECT 1 FROM "reflection_evidence" "e" WHERE "e"."messageId" = OLD."id" AND "e"."draftId" = "reflection_grants"."draftId" AND "e"."draftVersion" = "reflection_grants"."draftVersion");
 
   UPDATE "reflection_presentations" SET "status" = 'revoked', "revokedAt" = CURRENT_TIMESTAMP
   WHERE "status" IN ('active', 'acked')
-    AND "draftId" IN (SELECT DISTINCT "draftId" FROM "reflection_evidence" WHERE "messageId" = OLD."id");
+    AND EXISTS (SELECT 1 FROM "reflection_evidence" "e" WHERE "e"."messageId" = OLD."id" AND "e"."draftId" = "reflection_presentations"."draftId" AND "e"."draftVersion" = "reflection_presentations"."draftVersion");
 END;
 
 -- 源会话删除：已提交结论独立保留（records 无会话外键），但证据/结论须退出主动使用。
@@ -112,7 +118,7 @@ BEGIN
 
   UPDATE "reflection_records" SET "evidenceStatus" = 'review_required'
   WHERE "evidenceStatus" = 'valid'
-    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "sessionId" = OLD."id" AND "status" = 'invalid');
+    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "sessionId" = OLD."id" AND "status" = 'invalid' AND "recordId" = "reflection_records"."id" AND "recordVersion" = "reflection_records"."currentRevision");
 
   UPDATE "reflection_grants" SET "status" = 'revoked'
   WHERE "status" = 'active' AND "sessionId" = OLD."id";
@@ -144,7 +150,7 @@ BEGIN
 
   UPDATE "reflection_records" SET "evidenceStatus" = 'review_required'
   WHERE "evidenceStatus" = 'valid'
-    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "sessionId" = NEW."id" AND "status" = 'invalid');
+    AND "id" IN (SELECT "recordId" FROM "reflection_record_evidence" WHERE "sessionId" = NEW."id" AND "status" = 'invalid' AND "recordId" = "reflection_records"."id" AND "recordVersion" = "reflection_records"."currentRevision");
 
   UPDATE "reflection_drafts" SET "status" = 'preparing'
   WHERE "status" IN ('pending', 'confirmed_pending_save') AND "sessionId" = NEW."id";
