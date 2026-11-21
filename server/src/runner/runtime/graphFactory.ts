@@ -1,4 +1,5 @@
 import { joinSections } from './promptSections'
+import { HISTORY_LEADER_GUIDANCE } from '../historyTool'
 // Leader 单 agent 图工厂（#777 · #747 A 节「基础 leader 单 agent loop」）。
 //
 // createDeepAgent 三扩展点接线（#724 PoC 验证的形态）：
@@ -14,7 +15,7 @@ import { joinSections } from './promptSections'
 // session/run 持久化维度派生），**绝不允许运行期可变闭包**（PoC 的 fired 计数器是 throwaway
 // 形态，生产禁止——when 恒真或纯输入谓词）。resume 路径（RunService）必须以同 policy 源重建。
 
-import { GENERAL_PURPOSE_SUBAGENT, createDeepAgent, type CreateDeepAgentParams, type DeepAgent } from 'deepagents'
+import { GENERAL_PURPOSE_SUBAGENT, createDeepAgent, type CreateDeepAgentParams, type DeepAgent, type SubAgent } from 'deepagents'
 import type { Runnable } from '@langchain/core/runnables'
 import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint'
 import type { SandboxBackendProtocolV2 as DeepAgentsBackendV2 } from 'deepagents'
@@ -52,6 +53,8 @@ export function interruptOnFromPolicy(policy: InterruptPolicy | undefined): Inte
 // promptSections.ts 头注为权威）。
 
 export interface LeaderAgentParams {
+  /** RF-T01 内部验证接缝；生产组合根不注入，待完整门禁统一开放。 */
+  readonly historyTool?: NonNullable<CreateDeepAgentParams['tools']>[number]
   // 宽进 Runnable：ProviderRegistry.getDefaultModel 产出 withFallbacks 组合链（#747 F 节
   // 「fallback 链由 runner 从配置快照派生 .withFallbacks」）。
   readonly model: Runnable
@@ -89,12 +92,15 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt, params.skillPrompt),
-    ...(params.pluginPrompt || params.skillPrompt
+    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt, params.skillPrompt, params.historyTool ? HISTORY_LEADER_GUIDANCE : undefined),
+    ...(params.pluginPrompt || params.skillPrompt || params.historyTool
       ? {
           subagents: [{
             ...GENERAL_PURPOSE_SUBAGENT,
             systemPrompt: joinSections(GENERAL_PURPOSE_SUBAGENT.systemPrompt, subagentExtras),
+            // 显式覆盖框架默认继承，历史工具仅留在 Leader。
+            // 上游主图允许 ClientTool，子图类型仍限 StructuredTool；本项目装配均为后者。
+            tools: [...(params.tools ?? []), ...(params.pluginTools ?? []), ...(params.skillTools ?? [])] as SubAgent['tools'],
           }],
         }
       : {}),
@@ -103,6 +109,7 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
       ...(params.tools ?? []),
       ...(params.pluginTools ?? []),
       ...(params.skillTools ?? []),
+      ...(params.historyTool ? [params.historyTool] : []),
     ],
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }

@@ -1,3 +1,4 @@
+import { parseSavedProduct } from './productMessage'
 import type { BackgroundExecService } from '../runner/background/service'
 import { parseSlash, BUILTIN_COMMANDS } from '../plugins/slash'
 import { chaoxingCommand, parseChaoxingCommandArgs } from '../chaoxing/commands'
@@ -311,27 +312,8 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
     hasExec?: boolean
   } = {}
   if (row.role === 'assistant') {
-    try {
-      const parsed = JSON.parse(row.attachmentsJson) as {
-        v?: number
-        thinking?: string
-        tools?: unknown[]
-        media?: unknown[]
-        files?: unknown[]
-        filesTotal?: number
-        hasExec?: boolean
-      }
-      aggregate = {
-        ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
-        ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
-        ...(parsed.media !== undefined ? { media: parsed.media } : {}),
-        ...(parsed.files !== undefined ? { files: parsed.files } : {}),
-        ...(parsed.filesTotal !== undefined ? { filesTotal: parsed.filesTotal } : {}),
-        ...(parsed.hasExec !== undefined ? { hasExec: parsed.hasExec } : {}),
-      }
-    } catch {
-      aggregate = {} // 坏 JSON 不炸读路径（写面恒经 serializeAttachments，防御面）
-    }
+    // 页面恢复维持既有字段及缺省纪律；历史口另行报告解析问题。
+    aggregate = parseSavedProduct(row.attachmentsJson).fields
   }
   return {
     id: row.id,

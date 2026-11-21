@@ -14,6 +14,7 @@
 //   - 中间件拒绝（不调 handler）的调用不产生 v3 tools/* 流事件——红显由 onRejection 回调
 //     直接发 tool.start + tool.end{state:'error', rejection} 事件对（RunService 接线）。
 
+import { SESSION_HISTORY_TOOL_NAME } from '../../sessions/history/values'
 import type { ProviderConfigSnapshot } from '../providerRegistry'
 import { randomUUID } from 'node:crypto'
 import { ToolMessage } from '@langchain/core/messages'
@@ -252,6 +253,8 @@ export class ApprovalFunnel {
   }
 
   private async runFunnel(request: FunnelRequest, handler: FunnelHandler): Promise<ToolMessage | LangGraphCommand> {
+    // 已授权只读域能力：权限由业务口复核，查询参数不进入审批审计。
+    if (request.toolCall.name === SESSION_HISTORY_TOOL_NAME) return handler(request)
     const threadId = String(
       (request.runtime as { configurable?: { thread_id?: unknown } } | undefined)?.configurable?.thread_id ?? '',
     )
