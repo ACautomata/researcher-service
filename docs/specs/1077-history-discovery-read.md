@@ -41,7 +41,7 @@ P9 在本票验证每次初始读取重新授权；P10 验证未知书签同形�
 
 - `npm run typecheck`、`npm run build`：通过。
 - 历史参数/业务口/图装配，以及 sessionsApi、neutralExport、sessionsReducer、approvalFunnel、pluginsRegistry：最终复跑8文件、190测试通过。
-- `npm test` 全量运行过一次：172 文件通过，9 文件失败。5 个 Docker smoke suite 因 `/var/run/docker.sock` 不存在失败；openclawRetirement 扫入既有 `.scratch` 等工作区文件；两处 REST 用例在该轮失败；本次 wiki-update 夹具缺树也在该轮失败，已补齐并聚焦通过。
+- `npm test` 全量运行过一次：172 文件通过，9 文件失败。5 个 Docker smoke suite 因 `/var/run/docker.sock` 不存在失败；退役术语扫描 扫入既有 `.scratch` 等工作区文件；两处 REST 用例在该轮失败；本次 wiki-update 夹具缺树也在该轮失败，已补齐并聚焦通过。
 - 两处 REST 用例（models、chaoxingCommands）在原始 HEAD 的临时归档副本及当前工作区分别复跑：均为36测试通过。全量该轮仍保留失败记录，尚不能确认具体偶发原因。
 - 未运行真模型评测或容器化人工冒烟，不声称完整历史合同或生产发布门禁通过。
 - code-review 双轴审查：Standards 的重复范围类型建议、Spec 的 UTC 文本解析/混合格式排序及显式 search ID 顺序问题均已修复并复审关闭；当前两轴未解决发现均为0。新增真实 SQLite fixture 锁定 UTC 文本与 Prisma 毫秒时间同义、search 保持快照排序。
