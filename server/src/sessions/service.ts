@@ -20,7 +20,7 @@ import type { PluginRuntime } from '../plugins/surface'
 // GET 反序列化回同形状。事件流归约 ≡ 投影行（sessionsApi.test.ts 逐字节断言）。
 
 import { randomUUID } from 'node:crypto'
-import type { PrismaClient, PrismaPromise, Session, SessionMessage } from '../generated/prisma/client'
+import type { Prisma, PrismaClient, PrismaPromise, Session, SessionMessage } from '../generated/prisma/client'
 import type { AuthUser } from '../types'
 import { fail, EnvelopeError } from '../envelope'
 import { CODE } from '../codes'
@@ -197,6 +197,14 @@ export interface SessionServiceDeps {
       anchor: string
       caller?: { userId: string; username: string }
     }) => Promise<FileRewindPreview>
+  }
+  /** #1084（RF-T08）：删会话同事务钩子——封锁该会话引用的反思证据、关闭未提交草稿并撤授权。
+   *  缺省不注 = 无反思域（触发器仍兜底已提交记录的证据失效）。 */
+  readonly reflections?: {
+    readonly clearInitiatingSession: (
+      tx: Prisma.TransactionClient,
+      p: { ownerId: string; sessionId: string },
+    ) => Promise<void>
   }
   /** 插件运行时（#788 · #752 §2.3）：插件命令 {inject}/{execute} 在 sendMessage 命令构造点
    *  消费（启用集 per-command 现读快照）。缺省不注 = 无插件命令源（两源合并退化为单源）。 */
@@ -422,6 +430,9 @@ export class SessionService {
     for (const teammate of teammates) this.requireTerminal(teammate.threadId)
     await this.deps.sandboxes?.remove(sessionId)
     await this.deps.prisma.$transaction(async (tx) => {
+      // #1084：先在同一事务封锁反思证据/撤未消费授权/关闭未提交草稿，再删会话行（迟到提交
+      // 在事务先后上必然失败；已提交结论独立保留，由证据规则进入 review_required）。
+      await this.deps.reflections?.clearInitiatingSession(tx, { ownerId: session.ownerId, sessionId })
       const teammateThreads = await tx.teammate.findMany({
         where: { parentSessionId: sessionId },
         select: { threadId: true },

@@ -16,6 +16,8 @@ import type { PrismaClient } from '../src/generated/prisma/client'
 const INIT_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'utf8')
 // #1078：历史版本触发器与生产 db:apply 同一文件（init.sql 之外单独维护 BEGIN…END 块）。
 const HISTORY_TRIGGERS_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'history-triggers.sql'), 'utf8')
+// #1084：来源变化/删除/rewind → 反思证据同步封锁（与生产 db:apply 同一文件）。
+const REFLECTION_TRIGGERS_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'reflection-triggers.sql'), 'utf8')
 
 export interface TestContext {
   prisma: PrismaClient
@@ -34,6 +36,7 @@ export async function setupTestApp(extraDeps: Omit<AppDeps, 'prisma'> = {}): Pro
   const sqlite = new Database(dbPath)
   sqlite.exec(INIT_SQL)
   sqlite.exec(HISTORY_TRIGGERS_SQL)
+  sqlite.exec(REFLECTION_TRIGGERS_SQL)
   sqlite.close()
 
   const dbUrl = `file:${dbPath}`

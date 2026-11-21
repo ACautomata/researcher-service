@@ -51,6 +51,8 @@ export interface ReflectionDisplay {
   confirmable: boolean
   notConfirmableReason?: string
   deleted?: boolean
+  // #1084：来源变化/删除/失权后证据失效——摘录与正文副本已封锁，等待复核/重新起草。
+  invalidated?: boolean
 }
 
 export interface ReflectionAck {

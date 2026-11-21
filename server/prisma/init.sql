@@ -500,6 +500,42 @@ CREATE TABLE "reflection_records" (
 );
 
 -- CreateTable
+CREATE TABLE "reflection_record_evidence" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "recordId" TEXT NOT NULL,
+    "recordVersion" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "toolCallId" TEXT,
+    "region" TEXT NOT NULL,
+    "startCp" INTEGER,
+    "endCp" INTEGER,
+    "excerpt" TEXT NOT NULL,
+    "regionHash" TEXT,
+    "contentVersion" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'valid',
+    "reason" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_record_evidence_recordId_fkey" FOREIGN KEY ("recordId") REFERENCES "reflection_records" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "reflection_cleanup_outbox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "kind" TEXT NOT NULL DEFAULT 'source_cleanup',
+    "excerpt" TEXT NOT NULL,
+    "state" TEXT NOT NULL DEFAULT 'pending',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
 CREATE TABLE "reflection_revisions" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "recordId" TEXT NOT NULL,
@@ -709,6 +745,9 @@ CREATE INDEX "reflection_drafts_ownerId_status_idx" ON "reflection_drafts"("owne
 CREATE INDEX "reflection_evidence_ownerId_messageId_idx" ON "reflection_evidence"("ownerId", "messageId");
 
 -- CreateIndex
+CREATE INDEX "reflection_evidence_messageId_idx" ON "reflection_evidence"("messageId");
+
+-- CreateIndex
 CREATE INDEX "reflection_evidence_runId_idx" ON "reflection_evidence"("runId");
 
 -- CreateIndex
@@ -716,6 +755,9 @@ CREATE UNIQUE INDEX "reflection_evidence_draftId_draftVersion_position_key" ON "
 
 -- CreateIndex
 CREATE INDEX "reflection_presentations_ownerId_draftId_idx" ON "reflection_presentations"("ownerId", "draftId");
+
+-- CreateIndex
+CREATE INDEX "reflection_presentations_draftId_idx" ON "reflection_presentations"("draftId");
 
 -- CreateIndex
 CREATE INDEX "reflection_presentations_sessionId_idx" ON "reflection_presentations"("sessionId");
@@ -727,10 +769,28 @@ CREATE INDEX "reflection_records_ownerId_status_idx" ON "reflection_records"("ow
 CREATE INDEX "reflection_records_ownerId_updatedAt_idx" ON "reflection_records"("ownerId", "updatedAt");
 
 -- CreateIndex
+CREATE INDEX "reflection_record_evidence_ownerId_sessionId_messageId_idx" ON "reflection_record_evidence"("ownerId", "sessionId", "messageId");
+
+-- CreateIndex
+CREATE INDEX "reflection_record_evidence_messageId_idx" ON "reflection_record_evidence"("messageId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "reflection_record_evidence_recordId_recordVersion_position_key" ON "reflection_record_evidence"("recordId", "recordVersion", "position");
+
+-- CreateIndex
+CREATE INDEX "reflection_cleanup_outbox_state_createdAt_idx" ON "reflection_cleanup_outbox"("state", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "reflection_cleanup_outbox_messageId_idx" ON "reflection_cleanup_outbox"("messageId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "reflection_revisions_recordId_version_key" ON "reflection_revisions"("recordId", "version");
 
 -- CreateIndex
 CREATE INDEX "reflection_grants_ownerId_draftId_status_idx" ON "reflection_grants"("ownerId", "draftId", "status");
+
+-- CreateIndex
+CREATE INDEX "reflection_grants_draftId_idx" ON "reflection_grants"("draftId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "reflection_grants_ownerId_confirmationMessageId_key" ON "reflection_grants"("ownerId", "confirmationMessageId");

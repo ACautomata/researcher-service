@@ -261,7 +261,7 @@ describe('#1082 reflections 记录检索（真实 SQLite + 真实只读执行器
     const inactive = await seedRecord({ title: '停用经验', status: 'inactive' })
     const experience = await runtime.service.execute(leader(), { operation: 'read', targets: [{ record_id: inactive.id }] })
     expect(experience.outcome).toBe('partial_success')
-    expect((experience.records as Array<{ status: string; body_ref?: string }>)[0].status).toBe('unreadable')
+    expect((experience.records as Array<{ status: string; body_ref?: string }>)[0].status).toBe('not_found')
     expect((experience.records as Array<{ body_ref?: string }>)[0].body_ref).toBeUndefined()
 
     const noIntent = await runtime.service.execute(leader(), { operation: 'read', purpose: 'management', targets: [{ record_id: inactive.id }] })

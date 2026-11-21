@@ -18,7 +18,7 @@
 // skill_packages/skill_files/skill_enablements）。
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
-// 21→22 #1082 RF-T06 记录检索主请求额度账本 reflection_request_budgets（additive）。
+// 21→22 #1082 RF-T06 记录检索额度账本 + #1084 RF-T08 证据失效两表（均 additive）。
 export const SCHEMA_VERSION = 22
 
 export function runIncrementalSchema(db) {
@@ -950,6 +950,84 @@ CREATE INDEX IF NOT EXISTS "reflection_request_budgets_ownerId_sessionId_idx" ON
   if (!presentationColumns.some((c) => c.name === 'ackTurn')) {
     db.exec('ALTER TABLE "reflection_presentations" ADD COLUMN "ackTurn" INTEGER')
   }
+
+  // 21→22 #1084（RF-T08）来源变更闭环两表（additive；DDL 镜像 prisma/init.sql）：
+  // record evidence 独立于发起会话（无 session/message 外键），cleanup outbox 供可靠重放。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "reflection_record_evidence" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "recordId" TEXT NOT NULL,
+    "recordVersion" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "toolCallId" TEXT,
+    "region" TEXT NOT NULL,
+    "startCp" INTEGER,
+    "endCp" INTEGER,
+    "excerpt" TEXT NOT NULL,
+    "regionHash" TEXT,
+    "contentVersion" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'valid',
+    "reason" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "reflection_record_evidence_recordId_fkey" FOREIGN KEY ("recordId") REFERENCES "reflection_records" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "reflection_cleanup_outbox" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "kind" TEXT NOT NULL DEFAULT 'source_cleanup',
+    "excerpt" TEXT NOT NULL,
+    "state" TEXT NOT NULL DEFAULT 'pending',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "reflection_record_evidence_recordId_recordVersion_position_key" ON "reflection_record_evidence"("recordId", "recordVersion", "position");
+CREATE INDEX IF NOT EXISTS "reflection_record_evidence_ownerId_sessionId_messageId_idx" ON "reflection_record_evidence"("ownerId", "sessionId", "messageId");
+CREATE INDEX IF NOT EXISTS "reflection_record_evidence_messageId_idx" ON "reflection_record_evidence"("messageId");
+CREATE INDEX IF NOT EXISTS "reflection_cleanup_outbox_state_createdAt_idx" ON "reflection_cleanup_outbox"("state", "createdAt");
+CREATE INDEX IF NOT EXISTS "reflection_cleanup_outbox_messageId_idx" ON "reflection_cleanup_outbox"("messageId");
+-- 触发器按 messageId/draftId 定位（既有复合索引前缀不覆盖单列查询）。
+CREATE INDEX IF NOT EXISTS "reflection_evidence_messageId_idx" ON "reflection_evidence"("messageId");
+CREATE INDEX IF NOT EXISTS "reflection_presentations_draftId_idx" ON "reflection_presentations"("draftId");
+CREATE INDEX IF NOT EXISTS "reflection_grants_draftId_idx" ON "reflection_grants"("draftId");
+`)
+
+  // 21→22 回填：#1081 的正式记录只把证据快照写进 revision.evidenceJson；结构化表新增后
+  // 从当前 revision 幂等回填，使触发器/清理对升级前已提交记录同样生效（INSERT OR IGNORE
+  // 依赖上面唯一索引；json_each 逐条展开证据数组）。
+  db.exec(`
+INSERT OR IGNORE INTO "reflection_record_evidence"
+  ("id", "recordId", "recordVersion", "position", "ownerId", "sessionId", "messageId", "toolCallId",
+   "region", "startCp", "endCp", "excerpt", "regionHash", "contentVersion", "status", "reason", "createdAt")
+SELECT lower(hex(randomblob(16))), r."id", rev."version",
+  CAST(json_extract(j.value, '$.position') AS INTEGER),
+  r."ownerId",
+  json_extract(j.value, '$.sessionId'),
+  json_extract(j.value, '$.messageId'),
+  json_extract(j.value, '$.toolCallId'),
+  json_extract(j.value, '$.region'),
+  CAST(json_extract(j.value, '$.startCp') AS INTEGER),
+  CAST(json_extract(j.value, '$.endCp') AS INTEGER),
+  json_extract(j.value, '$.excerpt'),
+  json_extract(j.value, '$.regionHash'),
+  json_extract(j.value, '$.contentVersion'),
+  CASE WHEN json_extract(j.value, '$.status') = 'valid' THEN 'valid' ELSE 'invalid' END,
+  json_extract(j.value, '$.reason'),
+  CURRENT_TIMESTAMP
+FROM "reflection_records" r
+JOIN "reflection_revisions" rev ON rev."recordId" = r."id" AND rev."version" = r."currentRevision"
+JOIN json_each(rev."evidenceJson") j
+WHERE json_valid(rev."evidenceJson")
+  AND json_extract(j.value, '$.sessionId') IS NOT NULL
+  AND json_extract(j.value, '$.position') IS NOT NULL;
+`)
 }
 
 // baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。

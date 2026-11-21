@@ -151,8 +151,9 @@ function readRecords(db, p, deadline) {
       continue
     }
     if (p.experience) {
+      // 不存在/越权/不可主动使用同形 not_found（#1084 读门防探测）。
       if (row.status !== 'active' || row.evidenceStatus !== 'valid') {
-        out.push({ record_id: row.id, status: 'unreadable' })
+        out.push({ record_id: row.id, status: 'not_found' })
         continue
       }
       if (requestedVersion !== undefined && requestedVersion !== row.currentRevision) {
@@ -172,7 +173,15 @@ function readRecords(db, p, deadline) {
         : { record_id: row.id, status: 'not_found' })
       continue
     }
-    const evidence = parseJson(revision.evidenceJson, [])
+    // #1084：当前版本证据以规范化表为准（来源失效由清理链路更新 status/reason）；
+    // 旧库无规范化行时回退到 revision 快照。
+    const evidenceRows = db.prepare(`SELECT position,sessionId,messageId,toolCallId,region,startCp,endCp,
+      excerpt,regionHash,contentVersion,status,reason
+      FROM reflection_record_evidence WHERE recordId=? AND recordVersion=? ORDER BY position`)
+      .all(row.id, version)
+    const evidence = evidenceRows.length > 0
+      ? evidenceRows
+      : parseJson(revision.evidenceJson, [])
     out.push({
       record_id: row.id,
       status: 'ok',
@@ -188,13 +197,15 @@ function readRecords(db, p, deadline) {
       body_hash: revision.bodyHash,
       evidence: Array.isArray(evidence) ? evidence.map((e) => ({
         position: e.position,
-        session_id: e.sessionId ?? e.session_id ?? null,
-        message_id: e.messageId ?? e.message_id ?? null,
-        tool_call_id: e.toolCallId ?? e.tool_call_id ?? null,
+        sessionId: e.sessionId ?? null,
+        messageId: e.messageId ?? null,
+        toolCallId: e.toolCallId ?? null,
         region: e.region,
-        start: e.startCp ?? e.start ?? null,
-        end: e.endCp ?? e.end ?? null,
+        startCp: e.startCp ?? e.start ?? null,
+        endCp: e.endCp ?? e.end ?? null,
         excerpt: e.excerpt,
+        regionHash: e.regionHash ?? null,
+        contentVersion: e.contentVersion ?? null,
         status: e.status,
         ...(e.reason ? { reason: e.reason } : {}),
       })) : [],

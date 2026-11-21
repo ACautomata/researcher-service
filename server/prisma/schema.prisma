@@ -864,6 +864,7 @@ model ReflectionEvidence {
 
   @@unique([draftId, draftVersion, position])
   @@index([ownerId, messageId])
+  @@index([messageId]) // #1084：来源变更触发器按 messageId 定位
   @@index([runId])
   @@map("reflection_evidence")
 }
@@ -893,6 +894,7 @@ model ReflectionPresentation {
   createdAt DateTime @default(now())
 
   @@index([ownerId, draftId])
+  @@index([draftId]) // #1084：来源变更触发器按 draftId 撤销展示
   @@index([sessionId])
   @@map("reflection_presentations")
 }
@@ -922,10 +924,61 @@ model ReflectionRecord {
   updatedAt       DateTime @updatedAt
 
   revisions ReflectionRevision[]
+  evidence  ReflectionRecordEvidence[]
 
   @@index([ownerId, status])
   @@index([ownerId, updatedAt])
   @@map("reflection_records")
+}
+
+// #1084（RF-T08）：已提交记录的结构化证据引用——独立于发起会话（无 session/message 外键，
+// 源会话删除不级联删除已提交结论；来源失效只把证据标 invalid 并让记录 review_required）。
+model ReflectionRecordEvidence {
+  id             String          @id @default(cuid())
+  record         ReflectionRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+  recordId       String
+  recordVersion  Int
+  position       Int
+  ownerId        String
+  sessionId      String
+  messageId      String?
+  toolCallId     String?
+  // content | thinking | tool_result
+  region         String
+  startCp        Int?
+  endCp          Int?
+  excerpt        String
+  regionHash     String?
+  contentVersion String?
+  // valid | invalid（来源删除 / 内容变化 / 失权）；invalid 摘录不进入主动使用。
+  status         String   @default("valid")
+  reason         String?
+  createdAt      DateTime @default(now())
+
+  @@unique([recordId, recordVersion, position])
+  @@index([ownerId, sessionId, messageId])
+  @@index([messageId])
+  @@map("reflection_record_evidence")
+}
+
+// #1084（RF-T08）：可靠清理 outbox——源 mutation 与失效事实同事务入队（触发器/显式钩子），
+// 读门先同步封锁；清理任务幂等重放直到 done，进程重启不遗漏。
+model ReflectionCleanupOutbox {
+  id        String   @id
+  ownerId   String
+  sessionId String
+  messageId String?
+  kind      String   @default("source_cleanup")
+  // 待清理的来源摘录原文（独立副本：即便 evidence 行被级联删除仍可清理派生正文）。
+  excerpt   String
+  state     String   @default("pending")
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([state, createdAt])
+  @@index([messageId])
+  @@map("reflection_cleanup_outbox")
 }
 
 model ReflectionRevision {
@@ -968,6 +1021,7 @@ model ReflectionGrant {
 
   @@unique([ownerId, confirmationMessageId])
   @@index([ownerId, draftId, status])
+  @@index([draftId]) // #1084：来源变更触发器按 draftId 撤销未消费授权
   @@map("reflection_grants")
 }
 
