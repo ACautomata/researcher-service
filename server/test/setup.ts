@@ -14,6 +14,8 @@ import type { PrismaClient } from '../src/generated/prisma/client'
 // 不经 prisma CLI（避免 Prisma 7 的 AI 破坏性操作守卫 + 更快），随后 PrismaClient
 // 经 driver adapter 连同一文件。init.sql 随 schema 改动后用 npm run 重新生成。
 const INIT_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'utf8')
+// #1078：历史版本触发器与生产 db:apply 同一文件（init.sql 之外单独维护 BEGIN…END 块）。
+const HISTORY_TRIGGERS_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'history-triggers.sql'), 'utf8')
 
 export interface TestContext {
   prisma: PrismaClient
@@ -31,6 +33,7 @@ export async function setupTestApp(extraDeps: Omit<AppDeps, 'prisma'> = {}): Pro
   const dbPath = path.join(dir, 'test.db')
   const sqlite = new Database(dbPath)
   sqlite.exec(INIT_SQL)
+  sqlite.exec(HISTORY_TRIGGERS_SQL)
   sqlite.close()
 
   const dbUrl = `file:${dbPath}`

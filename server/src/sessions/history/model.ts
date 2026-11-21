@@ -5,6 +5,17 @@ export interface HistoryContext {
   readonly role: 'leader' | 'teammate' | 'wiki-update' | 'subagent'
 }
 
+export interface HistoryPosition {
+  turn: number
+  createdAt: string
+  id: string
+}
+
+export interface HistoryRange {
+  from_turn?: number
+  to_turn?: number
+}
+
 export interface HistoryMessageRow {
   id: string
   turn: number
@@ -14,26 +25,55 @@ export interface HistoryMessageRow {
   createdAt: string
 }
 
-export interface HistorySession {
+export interface HistorySessionMeta {
   id: string
   title: string
   createdAt: string
   latestMessageAt: string
+  version: number
+  upper?: HistoryPosition
+}
+
+export interface HistoryScanOptions {
+  after?: HistoryPosition
+  before?: HistoryPosition
+  beforeInclusive?: HistoryPosition
+  upTo?: HistoryPosition
+  range?: HistoryRange
+  time?: { from?: string; to?: string }
+  limitMessages: number
+  limitBytes: number
+}
+
+export interface HistoryScan {
   messages: HistoryMessageRow[]
+  hasMore: boolean
   limited: boolean
 }
 
-export interface HistorySnapshot {
-  sessions: HistorySession[]
+// 候选会话查询结果：超出冻结上限时 limited=true，业务层必须显式停止而不是报完成。
+export interface HistorySessionQuery {
+  sessions: HistorySessionMeta[]
   limited: boolean
+}
+
+export type HistoryDeniedCode = 'authorization' | 'unreadable' | 'current_session'
+
+// 只读适配器的拒绝语义：authorization = 无法核实调用者身份（fail closed）；
+// unreadable = 目标不在可读集合；current_session = 显式当前会话。
+export class HistoryDenied extends Error {
+  constructor(readonly code: HistoryDeniedCode) {
+    super(code)
+    this.name = 'HistoryDenied'
+  }
 }
 
 export interface HistoryReader {
-  // 单事务授权并读取有界快照；显式目标也必须在该权限边界内。
-  read(context: HistoryContext, sessionIds?: readonly string[], targets?: readonly HistoryReadTarget[]): HistorySnapshot
+  // 授权并返回冻结候选：可读会话按边界内最新消息时间降序、ID 兜底。
+  sessions(context: HistoryContext, options?: { sessionIds?: readonly string[] }): HistorySessionQuery
+  // 授权并读取有界消息切片；after 开区间、before/upTo 闭区间；before 结果仍按升序返回。
+  scan(context: HistoryContext, sessionId: string, options: HistoryScanOptions): HistoryScan
 }
-
-export interface HistoryReadTarget { session_id: string; range?: { from_turn?: number; to_turn?: number } }
 
 export interface HistoryAccessEvent {
   ownerId: string
@@ -50,15 +90,26 @@ export interface HistoryEvents {
   warn(message: string): void
 }
 
+export type HistoryGroupStatus = 'pending' | 'reading' | 'complete' | 'incomplete'
+
 export interface HistoryGroup {
   session_id: string
   title?: string
   created_at?: string
   latest_message_at?: string
-  status: 'complete' | 'incomplete'
+  status: HistoryGroupStatus
   error?: { code: string; message: string }
   messages?: HistoryEvidence[]
   missing?: { message_id: string; fields: string[] }[]
+}
+
+export interface HistorySegment {
+  region: 'content' | 'thinking'
+  index: number
+  start: number
+  end: number
+  total: number
+  next: boolean
 }
 
 export interface HistoryEvidence {
@@ -79,6 +130,10 @@ export interface HistoryEvidence {
   matches?: HistoryMatch[]
   context_only?: boolean
   excerpt?: { offset_unit: 'utf16'; start: number; end: number; omitted_before: boolean; omitted_after: boolean }
+  // 长区域分段：同一 message_id 的各段按 index 连续拼接；region=content 的段可重组正文。
+  segment?: HistorySegment
+  // 附属于消息的非文本字段（tools/media/files 等）单独成段时标记，便于消费方区分正文分段。
+  attached_fields?: boolean
 }
 
 export interface HistoryMatch {
@@ -94,9 +149,11 @@ export interface HistoryMatch {
 
 export interface HistoryResult {
   outcome: 'success' | 'partial_success' | 'failure'
-  progress: 'complete' | 'stopped'
+  progress: 'complete' | 'more' | 'stopped'
   groups: HistoryGroup[]
   count: { unit: 'sessions' | 'messages' | 'hits'; value: number }
+  cursor?: string
+  cursor_expires_at?: string
   error?: { category: 'parameter' | 'limit' | 'system' | 'permission'; code: string; message: string }
   guidance: string
 }

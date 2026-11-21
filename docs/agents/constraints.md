@@ -24,4 +24,6 @@
     FileArchive Port；events 域测试按 #747 Testing Decisions 的 S 编号标注：S1 信封级集成 /
     S3 纯逻辑单测）。沙箱/wiki 容器 smoke 需真 docker daemon（自动探测门控）；BullMQ 用例需真
     Redis（门控）。（#858：fleet 编排 smoke 与 BullMQ 生命周期队列用例随容器管理退役。）
+    历史检索（#1077/#1078）走 S1/S4：真实临时 SQLite + 公共 `execute` 口 + 真实只读适配器；
+    `prisma/history-triggers.sql` 由 `db:apply` 与 `test/setup.ts` 同源执行，维护会话历史变更版本。
   - frontend：`cd frontend && npm run test`（vitest）；`npm run build` 跑 vue-tsc 类型检查。
