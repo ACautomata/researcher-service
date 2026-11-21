@@ -9,7 +9,7 @@ import {
   type HistoryReader,
   type HistoryScan,
   type HistoryScanOptions,
-  type HistorySessionMeta,
+  type HistorySessionQuery,
 } from './model'
 
 interface SessionRow { id: string; title: string; createdAt: number | string; latestMessageAt: number | string; version: number | null }
@@ -35,26 +35,29 @@ export class SqliteHistoryReader implements HistoryReader {
     private readonly limits = { sessions: 1000 },
   ) {}
 
-  sessions(context: HistoryContext, options: { sessionIds?: readonly string[] } = {}): HistorySessionMeta[] {
+  sessions(context: HistoryContext, options: { sessionIds?: readonly string[] } = {}): HistorySessionQuery {
     return this.readDb(db => {
       requireCaller(db, context)
       const ids = options.sessionIds ? [...options.sessionIds] : undefined
+      const limit = ids ? Math.max(ids.length, 1) : this.limits.sessions
       const rows = db.prepare(`SELECT s.id,s.title,s.createdAt,COALESCE(v.version,0) AS version,
         COALESCE((SELECT MAX(${milliseconds('m.createdAt')}) FROM session_messages m WHERE m.sessionId=s.id AND m.archivedAt IS NULL),${milliseconds('s.createdAt')}) AS latestMessageAt
         FROM sessions s LEFT JOIN session_history_versions v ON v.sessionId=s.id
         WHERE s.ownerId=? AND s.id<>? AND s.archivedAt IS NULL AND s.isTeammate=0
         ${ids ? `AND s.id IN (${ids.map(() => '?').join(',')})` : ''}
         ORDER BY latestMessageAt DESC,s.id ASC LIMIT ?`)
-        .all(context.ownerId, context.currentSessionId, ...(ids ?? []), this.limits.sessions) as SessionRow[]
-      const uppers = rows.length
+        .all(context.ownerId, context.currentSessionId, ...(ids ?? []), limit + (ids ? 0 : 1)) as SessionRow[]
+      const limited = !ids && rows.length > this.limits.sessions
+      const visible = ids ? rows : rows.slice(0, this.limits.sessions)
+      const uppers = visible.length
         ? db.prepare(`SELECT sessionId,turn,createdAt,id FROM (
             SELECT m.sessionId,m.turn,m.createdAt,m.id,
               ROW_NUMBER() OVER (PARTITION BY m.sessionId ORDER BY m.turn DESC,${milliseconds('m.createdAt')} DESC,m.id DESC) AS rn
-            FROM session_messages m WHERE m.archivedAt IS NULL AND m.sessionId IN (${rows.map(() => '?').join(',')})
-          ) WHERE rn=1`).all(...rows.map(row => row.id)) as UpperRow[]
+            FROM session_messages m WHERE m.archivedAt IS NULL AND m.sessionId IN (${visible.map(() => '?').join(',')})
+          ) WHERE rn=1`).all(...visible.map(row => row.id)) as UpperRow[]
         : []
       const upperById = new Map(uppers.map(row => [row.sessionId, positionOf(row)]))
-      return rows.slice(0, this.limits.sessions).map(row => ({
+      const sessions = visible.map(row => ({
         id: row.id,
         title: row.title,
         createdAt: iso(row.createdAt),
@@ -62,6 +65,7 @@ export class SqliteHistoryReader implements HistoryReader {
         version: row.version ?? 0,
         ...(upperById.has(row.id) ? { upper: upperById.get(row.id) } : {}),
       }))
+      return { sessions, limited }
     })
   }
 
@@ -78,7 +82,8 @@ export class SqliteHistoryReader implements HistoryReader {
       if (options.after) { conditions.push(afterSql('m')); args.push(...positionArgs(options.after)) }
       if (options.upTo) { conditions.push(upToSql('m')); args.push(...positionArgs(options.upTo)) }
       if (options.before) { conditions.push(beforeSql('m')); args.push(...positionArgs(options.before)) }
-      const descending = options.before !== undefined
+      if (options.beforeInclusive) { conditions.push(upToSql('m')); args.push(...positionArgs(options.beforeInclusive)) }
+      const descending = options.before !== undefined || options.beforeInclusive !== undefined
       const candidates = db.prepare(`SELECT m.id,m.turn,length(CAST(m.content AS BLOB))+length(CAST(m.attachmentsJson AS BLOB)) AS bytes
         FROM session_messages m WHERE ${conditions.join(' AND ')}
         ORDER BY m.turn ${descending ? 'DESC' : 'ASC'},${milliseconds('m.createdAt')} ${descending ? 'DESC' : 'ASC'},m.id ${descending ? 'DESC' : 'ASC'}
@@ -97,12 +102,7 @@ export class SqliteHistoryReader implements HistoryReader {
         bytes -= candidate.bytes
       }
       const hasMore = limited || truncatedByCount || (candidates.length > messages.length && !descending)
-      return {
-        messages,
-        ...(messages.length ? { next: positionOf(messages[messages.length - 1]!) } : {}),
-        hasMore,
-        limited,
-      }
+      return { messages, hasMore, limited }
     })
   }
 

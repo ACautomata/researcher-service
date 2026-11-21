@@ -1,16 +1,16 @@
 // 服务级不透明书签：绑定 owner/调用会话/原条件/绝对到期；内容只在内存元数据，重启即失效。
 import { randomBytes } from 'node:crypto'
-import type { EvidenceCursor } from './evidence'
-import type { HistoryPosition, HistoryRange } from './model'
+import type { SegmentOffset } from './evidence'
+import type { HistoryGroupStatus, HistoryPosition, HistoryRange } from './model'
 
-export interface ReadTargetCursor {
+export interface ReadTargetProgress {
   sessionId: string
   range?: HistoryRange
-  status: 'pending' | 'reading' | 'complete' | 'incomplete'
+  status: HistoryGroupStatus
   version: number
   upper?: HistoryPosition
   position?: HistoryPosition
-  segment?: { messageId: string; cursor: EvidenceCursor }
+  segment?: { messageId: string; offset: SegmentOffset }
   error?: { code: string; message: string }
 }
 
@@ -26,6 +26,8 @@ export interface SearchCursorData {
   position?: HistoryPosition
   pendingAfter: number
   started: boolean
+  // 候选会话查询在冻结上限处被截断：显式停止，不把未扫描范围报成完整。
+  limited: boolean
 }
 
 export interface CursorStateBase {
@@ -37,7 +39,7 @@ export interface CursorStateBase {
 }
 
 export type CursorState =
-  | (CursorStateBase & { operation: 'read'; targets: ReadTargetCursor[] })
+  | (CursorStateBase & { operation: 'read'; targets: ReadTargetProgress[] })
   | (CursorStateBase & { operation: 'search'; search: SearchCursorData })
 
 export interface CursorLimits {
@@ -56,7 +58,7 @@ export class HistoryCursorStore {
 
   constructor(private readonly clock: () => number, private readonly limits: CursorLimits) {}
 
-  put(state: Omit<CursorStateBase, 'deadline'> & { operation: CursorState['operation']; targets?: ReadTargetCursor[]; search?: SearchCursorData }): CursorPutResult {
+  put(state: Omit<CursorStateBase, 'deadline'> & { operation: CursorState['operation']; targets?: ReadTargetProgress[]; search?: SearchCursorData }): CursorPutResult {
     const now = this.clock()
     this.cleanup(now)
     if (Buffer.byteLength(JSON.stringify(state), 'utf8') > this.limits.maxStateBytes) return { ok: false, reason: 'state_limit' }

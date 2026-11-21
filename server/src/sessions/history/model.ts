@@ -37,6 +37,7 @@ export interface HistorySessionMeta {
 export interface HistoryScanOptions {
   after?: HistoryPosition
   before?: HistoryPosition
+  beforeInclusive?: HistoryPosition
   upTo?: HistoryPosition
   range?: HistoryRange
   time?: { from?: string; to?: string }
@@ -46,8 +47,13 @@ export interface HistoryScanOptions {
 
 export interface HistoryScan {
   messages: HistoryMessageRow[]
-  next?: HistoryPosition
   hasMore: boolean
+  limited: boolean
+}
+
+// 候选会话查询结果：超出冻结上限时 limited=true，业务层必须显式停止而不是报完成。
+export interface HistorySessionQuery {
+  sessions: HistorySessionMeta[]
   limited: boolean
 }
 
@@ -64,7 +70,7 @@ export class HistoryDenied extends Error {
 
 export interface HistoryReader {
   // 授权并返回冻结候选：可读会话按边界内最新消息时间降序、ID 兜底。
-  sessions(context: HistoryContext, options?: { sessionIds?: readonly string[] }): HistorySessionMeta[]
+  sessions(context: HistoryContext, options?: { sessionIds?: readonly string[] }): HistorySessionQuery
   // 授权并读取有界消息切片；after 开区间、before/upTo 闭区间；before 结果仍按升序返回。
   scan(context: HistoryContext, sessionId: string, options: HistoryScanOptions): HistoryScan
 }

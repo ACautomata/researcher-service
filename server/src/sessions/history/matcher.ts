@@ -2,6 +2,8 @@ import type { HistoryEvidence, HistoryMatch } from './model'
 import type { HistoryRequest } from './params'
 
 type Search = Extract<HistoryRequest, { operation: 'search' }>
+export const DEFAULT_LITERAL_SEGMENT_CHARS = 8 * 1024
+export const DEFAULT_REGEX_FIELD_CHARS = 1024 * 1024
 export interface MatchOptions { literalSegmentChars?: number; regexFieldChars?: number }
 export interface MessageMatches { matches: HistoryMatch[]; limitedFields: string[] }
 const DEFAULT_FIELDS = ['user_content', 'assistant_content', 'tool_name', 'tool_input', 'tool_result']
@@ -61,7 +63,7 @@ export function matchMessage(message: HistoryEvidence, request: Search, options:
     let position: number
     let matchedLength: number
     if (query.mode === 'regex') {
-      if (region.text.length > (options.regexFieldChars ?? 1024 * 1024)) {
+      if (region.text.length > (options.regexFieldChars ?? DEFAULT_REGEX_FIELD_CHARS)) {
         limitedFields.push(region.field)
         return []
       }
@@ -69,7 +71,7 @@ export function matchMessage(message: HistoryEvidence, request: Search, options:
       position = found?.index ?? -1
       matchedLength = found?.[0].length ?? 0
     } else {
-      position = findLiteralAcrossSegments(region.text, query.text, request.case_sensitive, options.literalSegmentChars ?? 8 * 1024)
+      position = findLiteralAcrossSegments(region.text, query.text, request.case_sensitive, options.literalSegmentChars ?? DEFAULT_LITERAL_SEGMENT_CHARS)
       matchedLength = query.text.length
     }
     if (position < 0) return []

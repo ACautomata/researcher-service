@@ -55,14 +55,14 @@ export function historyEvidence(sessionId: string, row: HistoryMessageRow): Hist
   return evidence
 }
 
-export interface EvidenceCursor {
+export interface SegmentOffset {
   region: 'content' | 'thinking' | 'fields'
   offset: number
   index: number
 }
 
 // 长区域分段游标：普通消息返回 undefined（整条一次交付）；长正文/思考按区域连续分段。
-export function startEvidenceCursor(evidence: HistoryEvidence, segmentChars: number): EvidenceCursor | undefined {
+export function startSegment(evidence: HistoryEvidence, segmentChars: number): SegmentOffset | undefined {
   if (evidence.content.length <= segmentChars && (evidence.thinking?.length ?? 0) <= segmentChars) return undefined
   if (evidence.content.length > 0) return { region: 'content', offset: 0, index: 1 }
   if (evidence.thinking !== undefined) return { region: 'thinking', offset: 0, index: 1 }
@@ -75,9 +75,9 @@ export function hasAttachedFields(evidence: HistoryEvidence): boolean {
 }
 
 // 取一个交付片段；maxChars=0 表示附属性字段段不切分。返回的 next 为空即消息交付完毕。
-export function takeEvidencePart(evidence: HistoryEvidence, cursor: EvidenceCursor, maxChars: number): {
+export function takeEvidencePart(evidence: HistoryEvidence, cursor: SegmentOffset, maxChars: number): {
   part: HistoryEvidence
-  next?: EvidenceCursor
+  next?: SegmentOffset
 } {
   const base: HistoryEvidence = {
     session_id: evidence.session_id, message_id: evidence.message_id, turn: evidence.turn, role: evidence.role,
@@ -112,7 +112,7 @@ export function takeEvidencePart(evidence: HistoryEvidence, cursor: EvidenceCurs
   return { part }
 }
 
-function nextRegionAfterContent(evidence: HistoryEvidence, index: number): { next?: EvidenceCursor } {
+function nextRegionAfterContent(evidence: HistoryEvidence, index: number): { next?: SegmentOffset } {
   if (evidence.thinking !== undefined) return { next: { region: 'thinking', offset: 0, index: index + 1 } }
   if (hasAttachedFields(evidence)) return { next: { region: 'fields', offset: 0, index: index + 1 } }
   return {}

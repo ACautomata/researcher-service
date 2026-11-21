@@ -137,7 +137,7 @@ describe('session_history（RF-T01）', () => {
     expect(JSON.stringify(result)).not.toMatch(/should-not-exist|SELECT|stack|SQLITE/)
     const bounded = new SessionHistoryService(new SqliteHistoryReader(app.dbUrl.slice(5)), { scanMessages: 0 })
     expect(await bounded.execute(context, { operation: 'read', targets: [{ session_id: 'old' }] })).toMatchObject({
-      progress: 'stopped', groups: [{ status: 'reading' }], cursor: expect.any(String),
+      progress: 'more', groups: [{ status: 'reading' }], cursor: expect.any(String),
     })
     const small = new SessionHistoryService(new SqliteHistoryReader(app.dbUrl.slice(5)), { maxResponseBytes: 600 })
     expect(await small.execute(context, { operation: 'read', targets: [{ session_id: 'old' }] })).toMatchObject({ progress: 'stopped', error: { code: 'response_limit' } })

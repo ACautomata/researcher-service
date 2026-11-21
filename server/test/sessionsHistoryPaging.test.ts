@@ -6,7 +6,7 @@ import { SqliteHistoryReader } from '../src/sessions/history/sqliteReader'
 import type { HistoryContext, HistoryResult } from '../src/sessions/history/model'
 
 type ReadRequest = { operation: 'read'; targets: { session_id: string; range?: { from_turn?: number; to_turn?: number } }[] }
-type SearchRequest = { operation: 'search'; query?: { text: string; mode?: 'literal' | 'regex' }; fields?: ('user_content' | 'assistant_content' | 'tool_name' | 'tool_input' | 'tool_result' | 'thinking')[]; context?: { before?: number; after?: number }; title?: string; time?: { field?: 'message_created_at' | 'session_created_at'; from?: string; to?: string } }
+type SearchRequest = { operation: 'search'; session_ids?: string[]; query?: { text: string; mode?: 'literal' | 'regex' }; fields?: ('user_content' | 'assistant_content' | 'tool_name' | 'tool_input' | 'tool_result' | 'thinking')[]; context?: { before?: number; after?: number }; title?: string; time?: { field?: 'message_created_at' | 'session_created_at'; from?: string; to?: string } }
 type Request = ReadRequest | SearchRequest
 
 describe('session_history（RF-T02）', () => {
@@ -76,12 +76,38 @@ describe('session_history（RF-T02）', () => {
     await session('regexbig')
     await message('regexbig', 1, 'assistant', `${'甲'.repeat(100)}目标`)
 
-    for (const id of ['freeze', 'change', 'archiveT', 'restart', 'budget']) {
+    for (const id of ['freeze', 'change', 'archiveT', 'restart', 'budget', 'deleteT', 'archiveIns', 'rewindT', 'forkSrc']) {
       await session(id)
-      for (let turn = 1; turn <= (id === 'budget' ? 12 : id === 'archiveT' ? 3 : id === 'restart' ? 3 : 6); turn++) {
+      for (let turn = 1; turn <= (id === 'budget' ? 12 : id === 'archiveT' ? 3 : id === 'restart' || id === 'deleteT' || id === 'archiveIns' || id === 'rewindT' || id === 'forkSrc' ? 3 : 6); turn++) {
         await message(id, turn, turn % 2 ? 'user' : 'assistant', `${id}-消息${turn}`)
       }
     }
+
+    // O11：会话按边界内最新消息时间降序、ID 兜底；空会话回退创建时间。
+    await session('order-a')
+    await message('order-a', 1, 'assistant', '排序甲')
+    await session('order-b')
+    await message('order-b', 1, 'assistant', '排序乙')
+    await app.prisma.sessionMessage.update({ where: { id: 'order-a-m1' }, data: { createdAt: new Date('2026-01-01T00:00:00Z') } })
+    await app.prisma.sessionMessage.update({ where: { id: 'order-b-m1' }, data: { createdAt: new Date('2026-01-01T00:00:00Z') } })
+    await session('order-c')
+    await message('order-c', 1, 'assistant', '排序丙')
+    await app.prisma.sessionMessage.update({ where: { id: 'order-c-m1' }, data: { createdAt: new Date('2026-01-02T00:00:00Z') } })
+    await app.prisma.session.create({ data: { id: 'order-empty', ownerId: context.ownerId, containerId: 'order-empty', title: 'order-empty', createdAt: new Date('2026-01-03T00:00:00Z') } })
+
+    await session('searchFirst')
+    await message('searchFirst', 1, 'assistant', '分页变更词 甲')
+    await message('searchFirst', 2, 'assistant', '分页变更词 乙')
+    await app.prisma.sessionMessage.updateMany({ where: { sessionId: 'searchFirst' }, data: { createdAt: new Date('2026-01-05T00:00:00Z') } })
+    await session('searchNext')
+    await message('searchNext', 1, 'assistant', '分页变更词 丙')
+    await message('searchNext', 2, 'assistant', '分页变更词 丁')
+    await app.prisma.sessionMessage.updateMany({ where: { sessionId: 'searchNext' }, data: { createdAt: new Date('2026-01-04T00:00:00Z') } })
+    await session('pendingChange')
+    for (let turn = 1; turn <= 3; turn++) await message('pendingChange', turn, turn % 2 ? 'user' : 'assistant', `待改${turn}`)
+
+    await session('otherMulti', 't02-other')
+    for (let turn = 1; turn <= 4; turn++) await message('otherMulti', turn, turn % 2 ? 'user' : 'assistant', `他人多条${turn}`)
   })
   afterAll(async () => { await app.cleanup() })
 
@@ -159,12 +185,12 @@ describe('session_history（RF-T02）', () => {
     const history = service({ pageItems: 20, scanMessages: 4 })
     const first = await history.execute(context, { operation: 'search', query: { text: '条目十二' }, fields: ['assistant_content', 'user_content'], context: { before: 0, after: 0 } })
     expect(first.count.value).toBe(0)
-    expect(first.progress).toBe('stopped')
+    expect(first.progress).toBe('more')
     expect(first.cursor).toEqual(expect.any(String))
     expect(first.outcome).not.toBe('failure')
     const results = await pages(history, { operation: 'search', query: { text: '条目十二' }, fields: ['assistant_content', 'user_content'], context: { before: 0, after: 0 } })
     expect(results.at(-1)?.progress).toBe('complete')
-    expect(results.at(-1)?.groups.flatMap(g => g.messages ?? []).map(m => m.message_id)).toContain('multi-m12')
+    expect(results.flatMap(r => r.groups.flatMap(g => g.messages ?? [])).map(m => m.message_id)).toContain('multi-m12')
   })
 
   it('O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据', async () => {
@@ -268,9 +294,13 @@ describe('session_history（RF-T02）', () => {
     expect(await restarted.execute(context, { ...request, cursor })).toMatchObject({ error: { code: 'invalid_cursor', message: invalid } })
     let now = 100
     const clocked = service({ pageItems: 2, cursorTtlMs: 60_000, clock: () => now })
-    const timed = await clocked.execute(context, request)
+    const multiRequest: ReadRequest = { operation: 'read', targets: [{ session_id: 'multi' }] }
+    const timed = await clocked.execute(context, multiRequest)
+    expect(timed.cursor_expires_at).toBe(new Date(60_100).toISOString())
+    const continued = await clocked.execute(context, { ...multiRequest, cursor: timed.cursor! })
+    expect(continued.cursor_expires_at).toBe(new Date(60_100).toISOString()) // 到期时间不随续读延长
     now += 60_001
-    expect(await clocked.execute(context, { ...request, cursor: timed.cursor! })).toMatchObject({ error: { code: 'invalid_cursor', message: invalid } })
+    expect(await clocked.execute(context, { ...multiRequest, cursor: timed.cursor! })).toMatchObject({ error: { code: 'invalid_cursor', message: invalid } })
   })
 
   it('B7/B9/B14：可注入目标上限、响应字节上限与书签容量', async () => {
@@ -314,7 +344,103 @@ describe('session_history（RF-T02）', () => {
     expect((await service().execute(context, { operation: 'search', query: { text: '方案研究' } })).count.value).toBe(0)
   })
 
-  it('O6/O7/O8/O9/O11/O20：证据结构与节选/源截断/分段标识互不掩盖', async () => {
+  it('O11：目录按边界内最新消息时间降序、ID 兜底，空会话回退创建时间', async () => {
+    const result = await service().execute(context, { operation: 'search', session_ids: ['order-a', 'order-b', 'order-c', 'order-empty'] })
+    expect(result.groups.map(g => g.session_id)).toEqual(['order-empty', 'order-c', 'order-a', 'order-b'])
+  })
+
+  it('C8/B10：跨页续读保留命中前的上下文，不从头取消息', async () => {
+    const results = await pages(service({ scanMessages: 10 }), {
+      operation: 'search', query: { text: '条目十二' }, fields: ['assistant_content', 'user_content'], context: { before: 1, after: 0 },
+    })
+    const page = results.find(r => r.groups.some(g => g.messages?.some(m => m.message_id === 'multi-m12')))
+    const messages = page?.groups.find(g => g.session_id === 'multi')?.messages ?? []
+    expect(messages.map(m => m.message_id)).toEqual(['multi-m11', 'multi-m12'])
+    expect(messages[0]).toMatchObject({ context_only: true })
+    expect(messages[1]).toMatchObject({ matches: [expect.objectContaining({ field: 'assistant_content' })] })
+  })
+
+  it('O16/P12：搜索续读对尚未开始的已变化会话给出 changed 标记', async () => {
+    const history = service({ pageItems: 2 })
+    const request: SearchRequest = { operation: 'search', session_ids: ['searchFirst', 'searchNext'], query: { text: '分页变更词' }, context: { before: 0, after: 0 } }
+    const first = await history.execute(context, request)
+    expect(first.groups[0]?.session_id).toBe('searchFirst')
+    expect(first.cursor).toEqual(expect.any(String))
+    await app.prisma.sessionMessage.update({ where: { id: 'searchNext-m1' }, data: { content: '改后的正文' } })
+    const second = await history.execute(context, { ...request, cursor: first.cursor! })
+    expect(second.groups.find(g => g.session_id === 'searchNext')).toMatchObject({ status: 'incomplete', error: { code: 'changed' } })
+  })
+
+  it('M7：删除消息、归档行写入、rewind 批量归档与 fork 复制遵守版本语义', async () => {
+    {
+      const history = service({ pageItems: 2 })
+      const request: ReadRequest = { operation: 'read', targets: [{ session_id: 'deleteT' }] }
+      const first = await history.execute(context, request)
+      expect(first.cursor).toEqual(expect.any(String))
+      await app.prisma.sessionMessage.delete({ where: { id: 'deleteT-m2' } })
+      const changed = await history.execute(context, { ...request, cursor: first.cursor! })
+      expect(changed.groups[0]).toMatchObject({ status: 'incomplete', error: { code: 'changed' } })
+    }
+    {
+      const history = service({ pageItems: 2 })
+      const request: ReadRequest = { operation: 'read', targets: [{ session_id: 'archiveIns' }] }
+      const first = await history.execute(context, request)
+      expect(first.cursor).toEqual(expect.any(String))
+      await app.prisma.sessionMessage.create({ data: { id: 'archiveIns-residue', sessionId: 'archiveIns', turn: 9, role: 'assistant', content: '失败残留', archivedAt: new Date() } })
+      const changed = await history.execute(context, { ...request, cursor: first.cursor! })
+      expect(changed.groups[0]).toMatchObject({ status: 'incomplete', error: { code: 'changed' } })
+    }
+    {
+      const history = service({ pageItems: 2 })
+      const request: ReadRequest = { operation: 'read', targets: [{ session_id: 'rewindT' }] }
+      const first = await history.execute(context, request)
+      expect(first.cursor).toEqual(expect.any(String))
+      await app.prisma.sessionMessage.updateMany({ where: { sessionId: 'rewindT', turn: { gte: 2 } }, data: { archivedAt: new Date() } })
+      const changed = await history.execute(context, { ...request, cursor: first.cursor! })
+      expect(changed.groups[0]).toMatchObject({ status: 'incomplete', error: { code: 'changed' } })
+    }
+    {
+      const history = service({ pageItems: 2 })
+      const request: ReadRequest = { operation: 'read', targets: [{ session_id: 'forkSrc' }] }
+      const first = await history.execute(context, request)
+      expect(first.cursor).toEqual(expect.any(String))
+      await app.prisma.session.create({ data: { id: 'forkCopy', ownerId: context.ownerId, containerId: 'forkCopy', title: 'fork' } })
+      for (let turn = 1; turn <= 3; turn++) {
+        await app.prisma.sessionMessage.create({ data: { id: `forkCopy-m${turn}`, sessionId: 'forkCopy', turn, role: turn % 2 ? 'user' : 'assistant', content: `forkSrc-消息${turn}` } })
+      }
+      const ids = [...(first.groups[0]?.messages?.map(m => m.message_id) ?? [])]
+      let cursor = first.cursor
+      for (let i = 0; i < 5 && cursor; i++) {
+        const next = await history.execute(context, { ...request, cursor })
+        ids.push(...(next.groups[0]?.messages?.map(m => m.message_id) ?? []))
+        cursor = next.cursor
+      }
+      expect(ids).toEqual(['forkSrc-m1', 'forkSrc-m2', 'forkSrc-m3'])
+    }
+  })
+
+  it('B14/M9：全平台书签容量与单状态元数据上限显式拒绝', async () => {
+    const global = service({ pageItems: 1, maxCursors: 1 })
+    const held = await global.execute(context, { operation: 'read', targets: [{ session_id: 'multi' }] })
+    expect(held.cursor).toEqual(expect.any(String))
+    const other = await global.execute({ ownerId: 't02-other', currentSessionId: 't02-other-current', role: 'leader' }, { operation: 'read', targets: [{ session_id: 'otherMulti' }] })
+    expect(other).toMatchObject({ progress: 'stopped', error: { category: 'limit', code: 'busy' } })
+
+    const tiny = service({ pageItems: 1, maxCursorStateBytes: 64 })
+    const stateLimited = await tiny.execute(context, { operation: 'read', targets: [{ session_id: 'multi' }] })
+    expect(stateLimited).toMatchObject({ progress: 'stopped', error: { category: 'limit', code: 'state_limit' } })
+    expect(stateLimited.cursor).toBeUndefined()
+  })
+
+  it('B18/B14：候选会话冻结上限显式停止，不把未扫描目录报成完整', async () => {
+    const capped = new SessionHistoryService(new SqliteHistoryReader(readerPath(), { sessions: 1 }))
+    const result = await capped.execute(context, { operation: 'search' })
+    expect(result).toMatchObject({ progress: 'stopped', count: { unit: 'sessions', value: 1 } })
+    expect(result.cursor).toBeUndefined()
+    expect(result.guidance).toContain('候选会话超出冻结上限')
+  })
+
+  it('O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖', async () => {
     const read = await service().execute(context, { operation: 'read', targets: [{ session_id: 'multi', range: { from_turn: 2, to_turn: 3 } }] })
     expect(read.groups[0]?.messages).toEqual([
       expect.objectContaining({ message_id: 'multi-m2', content: '开场一', thinking: '思考甲', source_truncated: true, missing: [],

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { HistoryCursorStore, type CursorState, type FrozenSearchSession, type ReadTargetCursor, type SearchCursorData } from './cursor'
-import { historyEvidence, startEvidenceCursor, takeEvidencePart, type EvidenceCursor } from './evidence'
-import { literalContains, matchMessage, searchExcerpt, withinTime } from './matcher'
+import { HistoryCursorStore, type CursorState, type FrozenSearchSession, type ReadTargetProgress, type SearchCursorData } from './cursor'
+import { historyEvidence, startSegment, takeEvidencePart, type SegmentOffset } from './evidence'
+import { DEFAULT_LITERAL_SEGMENT_CHARS, DEFAULT_REGEX_FIELD_CHARS, literalContains, matchMessage, searchExcerpt, withinTime } from './matcher'
 import {
   type HistoryContext,
   type HistoryEvidence,
@@ -9,6 +9,8 @@ import {
   type HistoryPosition,
   type HistoryReader,
   type HistoryResult,
+  type HistoryScan,
+  type HistoryScanOptions,
   type HistorySessionMeta,
 } from './model'
 import { SessionHistorySchema, type HistoryRequest } from './params'
@@ -42,7 +44,6 @@ interface CallBudget {
   responseBytes: number
   scanMessages: number
   scanBytes: number
-  limited: boolean
   deadEnd: boolean
 }
 
@@ -63,8 +64,8 @@ export class SessionHistoryService {
       scanMessages: options.scanMessages ?? 1000,
       scanBytes: options.scanBytes ?? 8 * 1024 * 1024,
       segmentChars: options.segmentChars ?? 8 * 1024,
-      literalSegmentChars: options.literalSegmentChars ?? 8 * 1024,
-      regexFieldChars: options.regexFieldChars ?? 1024 * 1024,
+      literalSegmentChars: options.literalSegmentChars ?? DEFAULT_LITERAL_SEGMENT_CHARS,
+      regexFieldChars: options.regexFieldChars ?? DEFAULT_REGEX_FIELD_CHARS,
       cursorTtlMs: options.cursorTtlMs ?? 30 * 60 * 1000,
       maxCursorsPerUser: options.maxCursorsPerUser ?? 4,
       maxCursors: options.maxCursors ?? 64,
@@ -122,7 +123,7 @@ export class SessionHistoryService {
     const prepared = this.prepare(context, request, signal)
     if ('result' in prepared) return prepared.result
     const state = prepared.state
-    const budget: CallBudget = { items: 0, responseBytes: 0, scanMessages: this.options.scanMessages, scanBytes: this.options.scanBytes, limited: false, deadEnd: false }
+    const budget: CallBudget = { items: 0, responseBytes: 0, scanMessages: this.options.scanMessages, scanBytes: this.options.scanBytes, deadEnd: false }
     const page = state.operation === 'read'
       ? this.renderRead(context, state, budget)
       : this.renderSearch(context, state, request as SearchRequest, budget)
@@ -130,33 +131,21 @@ export class SessionHistoryService {
     const remaining = state.operation === 'read'
       ? state.targets.some(t => t.status === 'pending' || t.status === 'reading')
       : state.search.index < state.search.sessions.length || state.search.started
+    const capped = state.operation === 'search' && state.search.limited
     const failed = page.groups.some(g => g.status === 'incomplete' && g.error)
     const usable = page.groups.some(g => (g.messages?.length ?? 0) > 0 || (g.status === 'complete' && !g.error))
     const outcome = failed ? (usable ? 'partial_success' : 'failure') : 'success'
     const anyIncomplete = page.groups.some(g => g.status === 'incomplete')
-    const progress = remaining ? (budget.limited ? 'stopped' : 'more') : anyIncomplete ? 'stopped' : 'complete'
+    const progress: HistoryResult['progress'] = remaining ? 'more' : anyIncomplete || capped ? 'stopped' : 'complete'
     let cursor: { token: string; expiresAt: number } | undefined
     let limitError: HistoryResult['error']
-    if (remaining && (progress === 'more' || progress === 'stopped')) {
-      if (prepared.token) {
-        cursor = { token: prepared.token, expiresAt: state.deadline }
-      } else if (state.operation === 'read') {
-        state.page++
-        const put = this.cursors.put({
-          ownerId: context.ownerId, currentSessionId: context.currentSessionId, operation: 'read', requestHash: requestHash(request), page: state.page, targets: state.targets,
-        })
-        if (put.ok) cursor = { token: put.token, expiresAt: put.expiresAt }
-        else limitError = { category: 'limit', code: put.reason === 'busy' ? 'busy' : 'state_limit', message: '书签状态已满或过大，请缩小范围后重新查询' }
-      } else {
-        state.page++
-        const put = this.cursors.put({
-          ownerId: context.ownerId, currentSessionId: context.currentSessionId, operation: 'search', requestHash: requestHash(request), page: state.page, search: state.search,
-        })
-        if (put.ok) cursor = { token: put.token, expiresAt: put.expiresAt }
-        else limitError = { category: 'limit', code: put.reason === 'busy' ? 'busy' : 'state_limit', message: '书签状态已满或过大，请缩小范围后重新查询' }
-      }
+    if (remaining) {
+      const issued = this.issueCursor(context, request, state, prepared)
+      cursor = issued.cursor
+      limitError = issued.error
+    } else if (prepared.token) {
+      this.cursors.delete(prepared.token)
     }
-    if (!remaining && prepared.token) this.cursors.delete(prepared.token)
     const finalProgress = limitError ? 'stopped' as const : progress
     const result: HistoryResult = {
       outcome: limitError ? (usable ? 'partial_success' : 'failure') : outcome,
@@ -165,9 +154,22 @@ export class SessionHistoryService {
       count: page.count,
       ...(cursor ? { cursor: cursor.token, cursor_expires_at: new Date(cursor.expiresAt).toISOString() } : {}),
       ...(limitError ? { error: limitError } : {}),
-      guidance: guidance(finalProgress, limitError !== undefined),
+      guidance: capped && !remaining ? '候选会话超出冻结上限，本次结果不是完整目录；请缩小 ID、标题或时间范围重新查询。' : guidance(finalProgress, limitError !== undefined),
     }
     return result
+  }
+
+  // 续读复用同一不透明书签（绝对到期不续期）；新查询在容量/状态大小上限处显式拒绝。
+  private issueCursor(context: HistoryContext, request: HistoryRequest, state: CursorState, prepared: Prepared): { cursor?: { token: string; expiresAt: number }; error?: HistoryResult['error'] } {
+    if (prepared.token) return { cursor: { token: prepared.token, expiresAt: state.deadline } }
+    state.page++
+    const payload = state.operation === 'read'
+      ? { operation: 'read' as const, targets: state.targets }
+      : { operation: 'search' as const, search: state.search }
+    const put = this.cursors.put({ ownerId: context.ownerId, currentSessionId: context.currentSessionId, requestHash: requestHash(request), page: state.page, ...payload })
+    return put.ok
+      ? { cursor: { token: put.token, expiresAt: put.expiresAt } }
+      : { error: { category: 'limit', code: put.reason === 'busy' ? 'busy' : 'state_limit', message: '书签状态已满或过大，请缩小范围后重新查询' } }
   }
 
   private prepare(context: HistoryContext, request: HistoryRequest, signal?: AbortSignal): Prepared | { result: HistoryResult } {
@@ -181,17 +183,17 @@ export class SessionHistoryService {
       const targets = this.initReadTargets(context, request)
       return { state: { ownerId: context.ownerId, currentSessionId: context.currentSessionId, operation: 'read', requestHash: requestHash(request), page: 0, deadline: 0, targets } }
     }
-    const metas = this.reader.sessions(context, { sessionIds: request.session_ids })
-    const filtered = metas.filter(meta => (!request.title || literalContains(meta.title, request.title, request.case_sensitive)) &&
+    const queried = this.reader.sessions(context, { sessionIds: request.session_ids })
+    const filtered = queried.sessions.filter(meta => (!request.title || literalContains(meta.title, request.title, request.case_sensitive)) &&
       !(request.time?.field === 'session_created_at' && !withinTime(meta.createdAt, request.time)))
     const sessions: FrozenSearchSession[] = filtered.map(meta => ({ id: meta.id, version: meta.version, ...(meta.upper ? { upper: meta.upper } : {}) }))
     return { state: { ownerId: context.ownerId, currentSessionId: context.currentSessionId, operation: 'search', requestHash: requestHash(request), page: 0, deadline: 0,
-      search: { sessions, index: 0, pendingAfter: 0, started: false } } }
+      search: { sessions, index: 0, pendingAfter: 0, started: false, limited: queried.limited } } }
   }
 
-  private initReadTargets(context: HistoryContext, request: ReadRequest): ReadTargetCursor[] {
+  private initReadTargets(context: HistoryContext, request: ReadRequest): ReadTargetProgress[] {
     const ids = [...new Set(request.targets.map(t => t.session_id))]
-    const metas = this.reader.sessions(context, { sessionIds: ids })
+    const metas = this.reader.sessions(context, { sessionIds: ids }).sessions
     const byId = new Map(metas.map(meta => [meta.id, meta]))
     return request.targets.map(target => {
       if (target.session_id === context.currentSessionId) return { sessionId: target.session_id, status: 'incomplete', version: 0, error: { code: 'current_session', message: '当前会话不属于历史读取范围，请使用当前对话上下文' } }
@@ -209,9 +211,9 @@ export class SessionHistoryService {
 
   private renderRead(context: HistoryContext, state: Extract<CursorState, { operation: 'read' }>, budget: CallBudget): Page {
     const groups: HistoryGroup[] = []
-    const metas = this.reader.sessions(context, { sessionIds: [...new Set(state.targets.map(t => t.sessionId))] })
+    const metas = this.reader.sessions(context, { sessionIds: [...new Set(state.targets.map(t => t.sessionId))] }).sessions
     const byId = new Map(metas.map(meta => [meta.id, meta]))
-    const processor = new ReadProcessor(this.reader, this.options, context, budget)
+    const processor = new ReadProcessor(this.options, new BudgetedScanner(this.reader, context, budget), budget)
     let stop = false
     for (const target of state.targets) {
       const meta = byId.get(target.sessionId)
@@ -239,7 +241,7 @@ export class SessionHistoryService {
       groups.push(group)
       if (target.status === 'complete') continue
       if (stop || budget.items >= this.options.pageItems) { stop = true; continue }
-      stop = processor.readTarget(target, group, budget)
+      stop = processor.readTarget(target, group)
       if (group.status !== 'incomplete') group.status = target.status
       if (target.error && !group.error) group.error = target.error
     }
@@ -249,10 +251,11 @@ export class SessionHistoryService {
 
   private renderSearch(context: HistoryContext, state: Extract<CursorState, { operation: 'search' }>, request: SearchRequest, budget: CallBudget): Page {
     const data = state.search
-    const metas = this.reader.sessions(context, { sessionIds: data.sessions.map(s => s.id) })
+    const metas = this.reader.sessions(context, { sessionIds: data.sessions.map(s => s.id) }).sessions
     const byId = new Map(metas.map(meta => [meta.id, meta]))
     const groups: HistoryGroup[] = []
-    const processor = new SearchProcessor(this.reader, this.options, context, request, budget)
+    const scanner = new BudgetedScanner(this.reader, context, budget)
+    const processor = new SearchProcessor(this.options, scanner, request, budget)
     let hits = 0
     let stop = false
     while (!stop && data.index < data.sessions.length) {
@@ -267,67 +270,76 @@ export class SessionHistoryService {
         continue
       }
       if (meta.version !== frozen.version) {
-        if (data.started) {
-          groups.push(budgetGroup(budget, { session_id: frozen.id, title: meta.title, created_at: meta.createdAt, latest_message_at: meta.latestMessageAt, status: 'incomplete', error: { code: 'changed', message: '目标会话历史已变化，请重新查询该会话' } }))
-        }
+        groups.push(budgetGroup(budget, { session_id: frozen.id, title: meta.title, created_at: meta.createdAt, latest_message_at: meta.latestMessageAt, status: 'incomplete', error: { code: 'changed', message: '目标会话历史已变化，请重新查询该会话' } }))
         resetSession(data)
         continue
       }
       if (request.query && !frozen.upper) { resetSession(data); continue }
       if (!request.query) {
         if (request.time?.field === 'message_created_at') {
-          if (budget.scanMessages <= 0 || budget.scanBytes <= 0) { budget.limited = true; stop = true; break }
-          const probe = this.scan(context, frozen.id, { ...(frozen.upper ? { upTo: frozen.upper } : {}), time: { ...(request.time.from ? { from: request.time.from } : {}), ...(request.time.to ? { to: request.time.to } : {}) }, limitMessages: 1, limitBytes: budget.scanBytes }, budget)
-          if (!probe) { budget.limited = true; stop = true; break }
+          const probe = scanner.scan(frozen.id, { ...(frozen.upper ? { upTo: frozen.upper } : {}), time: { ...(request.time.from ? { from: request.time.from } : {}), ...(request.time.to ? { to: request.time.to } : {}) }, limitMessages: 1 })
+          if (!probe) { stop = true; break }
           if (!probe.messages.length) { resetSession(data); continue }
         }
         const group = budgetGroup(budget, { session_id: meta.id, title: meta.title, created_at: meta.createdAt, latest_message_at: meta.latestMessageAt, status: 'complete' })
         groups.push(group)
         budget.items++
-        data.index++
-        data.started = false
-        data.position = undefined
-        data.pendingAfter = 0
+        resetSession(data)
         continue
       }
       const outcome = processor.searchSession(data, meta.id, meta)
       if (outcome.group) groups.push(outcome.group)
       hits += outcome.hits
-      if (outcome.done) {
-        data.index++
-        data.started = false
-        data.position = undefined
-        data.pendingAfter = 0
-      } else {
-        stop = true
-      }
+      if (outcome.done) resetSession(data)
+      else stop = true
       if (budget.items >= this.options.pageItems || budget.deadEnd) break
     }
     return { groups, count: { unit: request.query ? 'hits' : 'sessions', value: request.query ? hits : groups.filter(g => g.status === 'complete').length } }
-  }
-
-  private scan(context: HistoryContext, sessionId: string, options: import('./model').HistoryScanOptions, budget: CallBudget): import('./model').HistoryScan | undefined {
-    if (budget.scanMessages <= 0 || budget.scanBytes <= 0) { budget.limited = true; return undefined }
-    const scan = this.reader.scan(context, sessionId, { ...options, limitMessages: Math.min(options.limitMessages, budget.scanMessages), limitBytes: Math.min(options.limitBytes, budget.scanBytes) })
-    budget.scanMessages -= scan.messages.length
-    budget.scanBytes -= scan.messages.reduce((n, row) => n + Buffer.byteLength(row.content, 'utf8') + Buffer.byteLength(row.attachmentsJson, 'utf8'), 0)
-    if (scan.limited) budget.limited = true
-    return scan
   }
 }
 
 interface Page { groups: HistoryGroup[]; count: HistoryResult['count'] }
 
+class BudgetedScanner {
+  constructor(
+    private readonly reader: HistoryReader,
+    private readonly context: HistoryContext,
+    private readonly budget: CallBudget,
+  ) {}
+
+  scan(sessionId: string, options: Omit<HistoryScanOptions, 'limitBytes'> & { limitMessages: number }): HistoryScan | undefined {
+    if (this.budget.scanMessages <= 0 || this.budget.scanBytes <= 0) return undefined
+    const scan = this.reader.scan(this.context, sessionId, {
+      ...options,
+      limitMessages: Math.min(options.limitMessages, this.budget.scanMessages),
+      limitBytes: this.budget.scanBytes,
+    })
+    this.budget.scanMessages -= scan.messages.length
+    this.budget.scanBytes -= scan.messages.reduce((n, row) => n + Buffer.byteLength(row.content, 'utf8') + Buffer.byteLength(row.attachmentsJson, 'utf8'), 0)
+
+    return scan
+  }
+}
+
 class ReadProcessor {
-  constructor(private readonly reader: HistoryReader, private readonly options: Options, private readonly context: HistoryContext, private readonly budget: CallBudget) {}
+  constructor(
+    private readonly options: Options,
+    private readonly scanner: BudgetedScanner,
+    private readonly budget: CallBudget,
+  ) {}
 
   // 返回 true 表示本轮页面应停止（预算耗尽）。
-  readTarget(target: ReadTargetCursor, group: HistoryGroup, budget: CallBudget): boolean {
+  readTarget(target: ReadTargetProgress, group: HistoryGroup): boolean {
     for (;;) {
-      const scan = this.scan(target)
-      if (!scan) { budget.limited = true; target.status = 'reading'; return true }
+      const scan = this.scanner.scan(target.sessionId, {
+        ...(target.position ? { after: target.position } : {}),
+        ...(target.upper ? { upTo: target.upper } : {}),
+        ...(target.range ? { range: target.range } : {}),
+        limitMessages: this.options.scanMessages,
+      })
+      if (!scan) { target.status = 'reading'; return true }
       if (!scan.messages.length) {
-        if (scan.hasMore) { budget.limited = true; target.status = 'reading'; return true }
+        if (scan.hasMore) { target.status = 'reading'; return true }
         target.status = 'complete'
         return false
       }
@@ -338,27 +350,27 @@ class ReadProcessor {
           group.error ??= { code: 'missing_product_fields', message: '部分保存的产品字段缺失，不能保证读取完整' }
           group.missing = [...(group.missing ?? []), { message_id: row.id, fields: evidence.missing }]
         }
-        const existing = target.segment && target.segment.messageId === row.id ? target.segment.cursor : undefined
-        const cursor = existing ?? startEvidenceCursor(evidence, this.options.segmentChars)
-        if (!cursor) {
-          if (budget.items >= this.options.pageItems) { target.status = 'reading'; return true }
-          if (estimate(evidence) > remainingBytes(budget, this.options)) {
-            if (budget.items === 0) budget.deadEnd = true
+        const existing = target.segment && target.segment.messageId === row.id ? target.segment.offset : undefined
+        const segment = existing ?? startSegment(evidence, this.options.segmentChars)
+        if (!segment) {
+          if (this.budget.items >= this.options.pageItems) { target.status = 'reading'; return true }
+          if (estimate(evidence) > remainingBytes(this.budget, this.options)) {
+            if (this.budget.items === 0) this.budget.deadEnd = true
             target.status = 'reading'
             return true
           }
-          emit(group, evidence, budget)
+          emit(group, evidence, this.budget)
           target.position = positionOf(row)
           target.segment = undefined
           continue
         }
-        if (this.emitSegments(evidence, cursor, target, group, budget) !== 'done') { target.status = 'reading'; return true }
+        if (this.emitSegments(evidence, segment, target, group) !== 'done') { target.status = 'reading'; return true }
         target.position = positionOf(row)
         target.segment = undefined
       }
       if (scan.hasMore || scan.limited) {
         target.status = 'reading'
-        if (scan.limited || budget.limited) return true
+        if (scan.limited) return true
         continue
       }
       target.status = 'complete'
@@ -366,56 +378,39 @@ class ReadProcessor {
     }
   }
 
-  private emitSegments(evidence: HistoryEvidence, start: EvidenceCursor, target: ReadTargetCursor, group: HistoryGroup, budget: CallBudget): 'done' | 'stop' {
-    let cursor: EvidenceCursor | undefined = start
-    while (cursor) {
-      if (budget.items >= this.options.pageItems) { target.segment = { messageId: evidence.message_id, cursor }; return 'stop' }
+  private emitSegments(evidence: HistoryEvidence, start: SegmentOffset, target: ReadTargetProgress, group: HistoryGroup): 'done' | 'stop' {
+    let offset: SegmentOffset | undefined = start
+    while (offset) {
+      if (this.budget.items >= this.options.pageItems) { target.segment = { messageId: evidence.message_id, offset }; return 'stop' }
       let allowed = this.options.segmentChars
-      let taken = takeEvidencePart(evidence, cursor, allowed)
-      while (cursor.region !== 'fields' && estimate(taken.part) > remainingBytes(budget, this.options) && allowed > 1) {
+      let taken = takeEvidencePart(evidence, offset, allowed)
+      while (offset.region !== 'fields' && estimate(taken.part) > remainingBytes(this.budget, this.options) && allowed > 1) {
         allowed = Math.max(1, Math.floor(allowed / 2))
-        taken = takeEvidencePart(evidence, cursor, allowed)
+        taken = takeEvidencePart(evidence, offset, allowed)
       }
-      if (cursor.region === 'fields' && estimate(taken.part) > remainingBytes(budget, this.options)) {
-        if (budget.items > 0) { target.segment = { messageId: evidence.message_id, cursor }; return 'stop' }
+      if (offset.region === 'fields' && estimate(taken.part) > remainingBytes(this.budget, this.options)) {
+        if (this.budget.items > 0) { target.segment = { messageId: evidence.message_id, offset }; return 'stop' }
         // 空页仍容不下附属性字段：明确标未完成，不伪装完整交付；不得让同一消息永远卡住。
         group.status = 'incomplete'
         group.error ??= { code: 'payload_too_large', message: '消息附属性字段超出本次响应上限' }
         return 'done'
       }
-      if (estimate(taken.part) > remainingBytes(budget, this.options)) {
-        if (budget.items === 0) budget.deadEnd = true
-        target.segment = { messageId: evidence.message_id, cursor }
+      if (estimate(taken.part) > remainingBytes(this.budget, this.options)) {
+        if (this.budget.items === 0) this.budget.deadEnd = true
+        target.segment = { messageId: evidence.message_id, offset }
         return 'stop'
       }
-      emit(group, taken.part, budget)
-      cursor = taken.next
+      emit(group, taken.part, this.budget)
+      offset = taken.next
     }
     return 'done'
-  }
-
-  private scan(target: ReadTargetCursor) {
-    const remaining = this.budget
-    if (remaining.scanMessages <= 0 || remaining.scanBytes <= 0) { remaining.limited = true; return undefined }
-    const scan = this.reader.scan(this.context, target.sessionId, {
-      ...(target.position ? { after: target.position } : {}),
-      ...(target.upper ? { upTo: target.upper } : {}),
-      ...(target.range ? { range: target.range } : {}),
-      limitMessages: Math.min(remaining.scanMessages, this.options.scanMessages),
-      limitBytes: Math.min(remaining.scanBytes, this.options.scanBytes),
-    })
-    remaining.scanMessages -= scan.messages.length
-    remaining.scanBytes -= scan.messages.reduce((n, row) => n + Buffer.byteLength(row.content, 'utf8') + Buffer.byteLength(row.attachmentsJson, 'utf8'), 0)
-    if (scan.limited) remaining.limited = true
-    return scan
   }
 }
 
 class SearchProcessor {
   constructor(
-    private readonly reader: HistoryReader,
     private readonly options: Options,
-    private readonly context: HistoryContext,
+    private readonly scanner: BudgetedScanner,
     private readonly request: SearchRequest,
     private readonly budget: CallBudget,
   ) {}
@@ -429,26 +424,26 @@ class SearchProcessor {
     let damaged = false
     data.started = true
     if (data.position && before > 0) {
-      const scan = this.scan(sessionId, { upTo: data.position, limitMessages: before })
+      // 取游标水位（含最后已扫描消息）之前的尾部窗口；必须 DESC 后反转，不能按 ASC 从头取。
+      const scan = this.scanner.scan(sessionId, { beforeInclusive: data.position, limitMessages: before })
       if (!scan) return { hits: 0, done: false }
       for (const row of scan.messages) tail.push({ pos: positionOf(row), evidence: historyEvidence(sessionId, row) })
     }
     let exhausted = false
     let stopped = false
     while (!stopped) {
-      if (this.budget.scanMessages <= 0 || this.budget.scanBytes <= 0) { this.budget.limited = true; stopped = true; break }
       const frozen = data.sessions[data.index]!
-      const scan = this.scan(sessionId, {
+      const scan = this.scanner.scan(sessionId, {
         ...(data.position ? { after: data.position } : {}),
         ...(frozen.upper ? { upTo: frozen.upper } : {}),
         ...(this.request.time?.field !== 'session_created_at' && this.request.time
           ? { time: { ...(this.request.time.from ? { from: this.request.time.from } : {}), ...(this.request.time.to ? { to: this.request.time.to } : {}) } }
           : {}),
-        limitMessages: Math.min(this.budget.scanMessages, this.options.scanMessages),
+        limitMessages: this.options.scanMessages,
       })
       if (!scan) { stopped = true; break }
       if (!scan.messages.length) {
-        if (scan.hasMore) { this.budget.limited = true; stopped = true; break }
+        if (scan.hasMore) { stopped = true; break }
         exhausted = true
         data.pendingAfter = 0
         break
@@ -476,8 +471,8 @@ class SearchProcessor {
       }
       if (stopped) break
       if (scan.hasMore || scan.limited) {
-        if (scan.limited) this.budget.limited = true
-        stopped = scan.limited || this.budget.limited
+
+        stopped = scan.limited
         if (!stopped) continue
         break
       }
@@ -515,28 +510,16 @@ class SearchProcessor {
     const hasGroup = (group.messages?.length ?? 0) > 0 || group.status !== 'complete' || group.error !== undefined
     return { group: hasGroup ? group : undefined, hits: emittedHits, done: exhausted && data.pendingAfter === 0 && group.status !== 'reading' }
   }
-
-  private scan(sessionId: string, options: Omit<import('./model').HistoryScanOptions, 'limitBytes'>) {
-    const budget = this.budget
-    if (budget.scanMessages <= 0 || budget.scanBytes <= 0) { budget.limited = true; return undefined }
-    const scan = this.reader.scan(this.context, sessionId, { ...options, limitMessages: Math.min(options.limitMessages, budget.scanMessages), limitBytes: budget.scanBytes })
-    budget.scanMessages -= scan.messages.length
-    budget.scanBytes -= scan.messages.reduce((n, row) => n + Buffer.byteLength(row.content, 'utf8') + Buffer.byteLength(row.attachmentsJson, 'utf8'), 0)
-    if (scan.limited) budget.limited = true
-    return scan
-  }
 }
 
-function groupSkeleton(target: ReadTargetCursor, meta: HistorySessionMeta | undefined, budget: CallBudget): HistoryGroup {
-  const skeleton: HistoryGroup = {
+function groupSkeleton(target: ReadTargetProgress, meta: HistorySessionMeta | undefined, budget: CallBudget): HistoryGroup {
+  return budgetGroup(budget, {
     session_id: target.sessionId,
     status: target.status,
     messages: [],
     ...(meta ? { title: meta.title, created_at: meta.createdAt, latest_message_at: meta.latestMessageAt } : {}),
     ...(target.error ? { error: target.error } : {}),
-  }
-  budget.responseBytes += estimate(skeleton)
-  return skeleton
+  })
 }
 
 function budgetGroup(budget: CallBudget, skeleton: HistoryGroup): HistoryGroup {
