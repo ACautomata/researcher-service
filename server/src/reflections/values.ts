@@ -68,6 +68,34 @@ export type ReflectionPresentationStatus = (typeof REFLECTION_PRESENTATION_STATU
 export const REFLECTION_REGIONS = ['content', 'thinking', 'tool_result'] as const
 export type ReflectionRegion = (typeof REFLECTION_REGIONS)[number]
 
+// 正式记录生命周期（I3）：主动使用仅 active+valid；management 可读其余状态。
+export const REFLECTION_RECORD_STATUSES = ['active', 'inactive', 'superseded', 'deleted'] as const
+export type ReflectionRecordStatus = (typeof REFLECTION_RECORD_STATUSES)[number]
+
+export const REFLECTION_EVIDENCE_STATES = ['valid', 'review_required'] as const
+export type ReflectionEvidenceState = (typeof REFLECTION_EVIDENCE_STATES)[number]
+
+// 记录检索固定上限（父规格 I6 / RF-T06）。
+export const REFLECTION_RETRIEVAL = {
+  pageDefault: 20,
+  pageMax: 50,
+  queryCodePoints: 256,
+  queryWords: 8,
+  readTargets: 5,
+  cursorTtlMs: 10 * 60_000,
+  cursorsPerUser: 4,
+  cursorsGlobal: 64,
+  cursorStateBytes: 256 * 1024,
+  budgetCalls: 20,
+  budgetWaitMs: 10_000,
+  budgetBytes: 256 * 1024,
+  cooperativeMs: 2_000,
+  callBytes: 64 * 1024,
+  evidenceVerificationsPerCall: 128,
+  // 固定快照上限：超出即 stopped 并指引缩小查询，不静默让后半永不可读。
+  snapshotRecords: 2000,
+} as const
+
 // 自然语言确认的 6 类结构化结果（#1081 · RF-T05）：分类器、schema 与业务共用单一来源。
 export const REFLECTION_CONFIRMATION_DECISIONS = [
   'confirm',

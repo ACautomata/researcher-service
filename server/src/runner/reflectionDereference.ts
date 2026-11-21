@@ -67,13 +67,17 @@ async function collectBodies(messages: readonly BaseMessage[], dereference: Dere
       for (const match of text.matchAll(REFLECTION_DRAFT_REF_RE)) {
         const key = `draft:${match[1]}:${match[2]}`
         if (bodies.has(key)) continue
+        // 草稿正文同样只展开本轮 management read 实际返回的引用。
+        if (!frame.authorizedDrafts.has(`${match[1]}:${match[2]}`)) continue
         const body = await dereference.draftBodyText(frame.context.ownerId, match[1], Number(match[2]))
         if (body !== null) bodies.set(key, body)
       }
       for (const match of text.matchAll(REFLECTION_RECORD_REF_RE)) {
         const key = `record:${match[1]}:${match[2]}`
         if (bodies.has(key)) continue
-        const body = await dereference.recordBodyText(frame.context.ownerId, match[1], Number(match[2]))
+        // 只有本轮 read 实际授权过的记录引用才展开；模型自填的引用保持占位。
+        if (!frame.authorizedRecords.has(`${match[1]}:${match[2]}`)) continue
+        const body = await dereference.recordBodyText(frame.context, match[1], Number(match[2]))
         if (body !== null) bodies.set(key, body)
       }
     }

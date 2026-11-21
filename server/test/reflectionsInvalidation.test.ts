@@ -102,6 +102,8 @@ describe('#1084 来源变化/删除/rewind 证据失效闭环（真实 SQLite）
     ownerId,
     currentSessionId: sessionId,
     role: 'leader',
+    // #1082：management 检索/读取需可信用户管理意图（本套件只验证失效语义）。
+    managementIntent: true,
     ...(triggerMessageId ? { triggerMessageId } : {}),
   })
 

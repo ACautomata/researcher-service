@@ -253,14 +253,14 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
   })
 
   it('management 可列/读草稿；experience 不暴露未确认草稿', async () => {
-    const management = await runtime.service.execute(leader(), { operation: 'search', purpose: 'management' })
+    const management = await runtime.service.execute({ ...leader(), managementIntent: true }, { operation: 'search', purpose: 'management', draft_state: 'pending' })
     expect(management.outcome).toBe('success')
     expect((management.drafts as unknown[]).length).toBeGreaterThan(0)
     const experience = await runtime.service.execute(leader(), { operation: 'search', purpose: 'experience' })
     expect(experience.outcome).toBe('success')
     expect(experience.records).toEqual([])
-    const readExperience = await runtime.service.execute(leader(), { operation: 'read', purpose: 'experience', targets: [{ draft_id: 'whatever' }] })
-    expect(readExperience.drafts).toEqual([{ draft_id: 'whatever', status: 'not_found' }])
+    const readExperience = await runtime.service.execute(leader(), { operation: 'read', purpose: 'experience', targets: [{ record_id: 'whatever' }] })
+    expect(readExperience.records).toEqual([{ record_id: 'whatever', status: 'not_found' }])
   })
 
   it('取消：关闭未提交草稿并清理证据/展示', async () => {
@@ -361,6 +361,8 @@ describe('#1080/#1081 reflections 表 parity（fresh vs 增量）', () => {
         'reflection_revisions',
         'reflection_grants',
         'reflection_idempotency',
+        // #1082 RF-T06 记录检索主请求额度账本
+        'reflection_request_budgets',
       ]) {
         const a = fresh.prepare(`PRAGMA table_info("${table}")`).all()
         const b = up.prepare(`PRAGMA table_info("${table}")`).all()

@@ -576,6 +576,19 @@ CREATE TABLE "reflection_idempotency" (
 );
 
 -- CreateTable
+CREATE TABLE "reflection_request_budgets" (
+    "requestId" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "lastRunId" TEXT NOT NULL,
+    "calls" INTEGER NOT NULL DEFAULT 0,
+    "waitedMs" INTEGER NOT NULL DEFAULT 0,
+    "returnedBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
 CREATE TABLE "reflection_events" (
     "seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "ownerId" TEXT NOT NULL,
@@ -784,6 +797,9 @@ CREATE UNIQUE INDEX "reflection_grants_ownerId_confirmationMessageId_key" ON "re
 
 -- CreateIndex
 CREATE INDEX "reflection_idempotency_ownerId_idx" ON "reflection_idempotency"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "reflection_request_budgets_ownerId_sessionId_idx" ON "reflection_request_budgets"("ownerId", "sessionId");
 
 -- CreateIndex
 CREATE INDEX "reflection_events_ownerId_objectId_idx" ON "reflection_events"("ownerId", "objectId");

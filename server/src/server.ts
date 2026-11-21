@@ -53,8 +53,8 @@ async function main(): Promise<void> {
   })
   // #1056 Skill 市场服务（B 票 REST 消费 A 票管线 + 三表；D1 全员直发——权限矩阵在路由注释）。
   const skillsMarket = new SkillMarketService({ prisma })
-  // #1080 RF-T04：reflections 草稿链路（展示读取/ack 窄协议挂载）。工具本体仍为内部接缝——
-  // 不注入 runner deps.reflections，生产两个新工具继续等待完整门禁。
+  // #1080 RF-T04 / #1082 RF-T06：reflections（草稿链路 + 记录检索）——展示读取/ack 窄协议挂载。
+  // 工具本体仍为内部接缝——不注入 runner deps.reflections，生产两个新工具继续等待完整门禁。
   const reflections = createReflectionsRuntime(prisma)
   // #1084（RF-T08）：来源失效清理 outbox——启动即重放，周期扫描；关闭时等待短事务收尾。
   const reflectionsCleanup = new ReflectionCleanupService(prisma)
