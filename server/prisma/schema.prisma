@@ -825,6 +825,8 @@ model ReflectionDraft {
   contentJson String @default("{}")
   // 动作目标基准版本（revise/replace/merge 等；本票仅 create/revise 写入）
   targetsJson String?
+  // 专属副本归属不依赖会过期的幂等结果。
+  committedRecordId String?
   closedAt  DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

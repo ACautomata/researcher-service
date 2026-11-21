@@ -21,6 +21,7 @@ import {
   sha256,
   utf8Bytes,
 } from './content'
+import { ReflectionDraftLimitError, isLifecycleAction, REFLECTION_DELETE_BOUNDARY } from './lifecycle'
 import type {
   ConfirmationActionSnapshot,
   ConfirmationCandidate,
@@ -150,7 +151,7 @@ export class ReflectionService {
         } catch (err) {
           // 不把底层异常文本（可能含 SQL/路径）回给模型。
           console.warn(`[reflections] ${operation} failed: ${(err as Error).name}`)
-          result = failure('system', 'system_error', '反思操作失败', operation)
+          result = err instanceof ReflectionDraftLimitError ? failure('limit', 'limit', '草稿达到每用户100活跃或24小时100新建上限', operation) : failure('system', 'system_error', '反思操作失败', operation)
         }
         result = this.fitToCallBytes(result, operation)
         if (!await this.settleBudget(budget.request, result, started) && !(operation === 'commit' && result.outcome === 'success')) {
@@ -812,6 +813,7 @@ export class ReflectionService {
   }
 
   private async draft(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'draft' }>, signal?: AbortSignal): Promise<ReflectionResult> {
+    if (!('category' in request)) return this.lifecycleDraft(context, request)
     const previous = request.draft_id ? await this.store.getDraft(context.ownerId, request.draft_id) : null
     const action = previous?.targets?.length ? previous.action : request.action
     const requestedTargets = request.targets ?? previous?.targets ?? []
@@ -987,12 +989,34 @@ export class ReflectionService {
     }
   }
 
+  private async lifecycleDraft(context: ReflectionContext, request: Extract<ReflectionRequest, { action: 'deactivate' | 'reactivate' | 'delete' }>): Promise<ReflectionResult> {
+    const target = request.targets[0]
+    const record = await this.store.getRecord(context.ownerId, target.record_id)
+    if (!record || record.status === 'deleted') return failure('parameter', 'not_found', '目标不存在或已删除', 'draft')
+    if (record.currentRevision !== target.version ||
+        (request.action === 'reactivate' && record.status !== 'inactive') ||
+        (request.action === 'deactivate' && record.status !== 'active')) {
+      return failure('conflict', 'conflict', '目标生命周期或版本不匹配，请读取最新基准', 'draft')
+    }
+    const targets: ReflectionTarget[] = [{ record_id: target.record_id, version: target.version, generation: record.generation,
+      status: record.status, evidence_status: record.evidenceStatus, evidence_hash: sha256(JSON.stringify(record.evidence)) }]
+    const body: DraftBody = { title: record.body.title, category: record.body.category,
+      problem: request.action === 'delete' ? REFLECTION_DELETE_BOUNDARY : request.action === 'deactivate'
+        ? '确认后停用此记录，退出主动使用；记录及原始证据保留。'
+        : '确认后只恢复生命周期；待复核证据不会变为有效，仍不进入主动使用。',
+      causes: [], improvements: [], scope: { labels: [], conditions: '', exclusions: '' } }
+    const draft = await this.store.createDraft({ ownerId: context.ownerId, sessionId: context.currentSessionId,
+      body, evidence: [], status: 'pending', action: request.action, targets })
+    return success('draft', { draft: { draft_id: draft.id, version: draft.version, status: draft.status, action: draft.action,
+      body_ref: reflectionDraftRef(draft.id, draft.version) }, confirmable: true }, '请 present 完整动作和目标，等待自然语言确认。')
+  }
+
   private async present(context: ReflectionContext, request: Extract<ReflectionRequest, { operation: 'present' }>): Promise<ReflectionResult> {
     const draft = await this.store.getDraft(context.ownerId, request.draft_id)
     // 跨会话：本人草稿可在新会话重新调出展示（展示归属当前会话，授权绑定当前确认消息）。
     if (!draft) return failure('parameter', 'not_found', '草稿不存在', 'present')
     if (draft.version !== request.version) return failure('conflict', 'conflict', '草稿版本已变化，请重新展示最新版本', 'present')
-    if (draft.status === 'cancelled' || draft.status === 'committed' || draft.status === 'rejected') {
+    if (!['pending', 'preparing', 'confirmed_pending_save'].includes(draft.status)) {
       return failure('conflict', 'not_ready', '草稿已关闭，不能展示', 'present')
     }
     // 展示前复核来源可见性与内容版本（父规格 I4）；失效即回 preparing，不得展示为可确认版本。
@@ -1145,6 +1169,7 @@ export class ReflectionService {
 
   // 来源复核（I4）：展示/提交前逐条重读已核验证据的来源，内容版本变化或不可读即失效。
   private async reverifyEvidence(context: ReflectionContext, draft: DraftRecord): Promise<string | null> {
+    if (isLifecycleAction(draft.action)) return null
     for (const e of draft.evidence) {
       if (e.status !== 'valid') {
         if (isSourceInvalidReason(e.reason)) return e.reason ?? 'source_changed'
@@ -1225,7 +1250,7 @@ export class ReflectionService {
     if (classification.decision !== 'confirm') {
       const effect = NON_CONFIRM_EFFECTS[classification.decision]
       if (effect.storage !== undefined) {
-        // 未提交就撤授权；revise/withdraw 保留草稿但必须重新展示确认，reject 直接关闭草稿。
+        // revise 保留草稿并要求重新展示；reject/withdraw 清除未提交专属副本。
         await this.store.applyDecision({
           ownerId: context.ownerId,
           draftId: candidate.draft.id,
@@ -1298,7 +1323,7 @@ export class ReflectionService {
   async draftBodyText(ownerId: string, draftId: string, version: number): Promise<string | null> {
     const draft = await this.store.getDraft(ownerId, draftId)
     if (!draft || draft.version !== version) return null
-    if (draft.status === 'cancelled' || draft.status === 'committed') return null
+    if (!['pending', 'preparing', 'confirmed_pending_save'].includes(draft.status)) return null
     const blocked = blockedDraftExcerpts(draft.evidence)
     return formatDraftBody(
       scrubDraftBody(draft.body, blocked),

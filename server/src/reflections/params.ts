@@ -120,6 +120,12 @@ export const ReflectionDraftSchema = z.object({
   }
 })
 
+export const ReflectionLifecycleSchema = z.object({
+  operation: z.literal('draft'),
+  action: z.enum(['deactivate', 'reactivate', 'delete']),
+  targets: z.array(z.object({ record_id: id, version: z.number().int().min(1) }).strict()).length(1),
+}).strict()
+
 export const ReflectionPresentSchema = z.object({
   operation: z.literal('present'),
   draft_id: id,
@@ -144,6 +150,7 @@ export const ReflectionRecordsSchema = z.union([
   ReflectionSearchSchema,
   ReflectionReadSchema,
   ReflectionDraftSchema,
+  ReflectionLifecycleSchema,
   ReflectionPresentSchema,
   ReflectionCommitSchema,
   ReflectionCancelSchema,

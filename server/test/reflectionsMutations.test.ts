@@ -10,6 +10,7 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 import { createPrismaClient } from '../src/prisma'
 import type { PrismaClient } from '../src/generated/prisma/client'
+import { ReflectionCleanupService } from '../src/reflections/cleanup'
 import { createReflectionsRuntime, type ReflectionsRuntime } from '../src/reflections/runtime'
 import type {
   ConfirmationClassification,
@@ -348,6 +349,171 @@ describe('#1083 完整确认路径的正式记录变更', () => {
     const context = await authorize(revised)
     await prisma.sessionMessage.update({ where: { id: old.messageId! }, data: { content: '旧版来源已变化' } })
     expect((await runtime.service.execute(context, { operation: 'commit', ...revised })).outcome).toBe('success')
+  })
+
+  it('RF11 停用/恢复沿用完整展示确认，恢复待复核记录不洗白证据', async () => {
+    const first = await save()
+    const lifecycle = async (action: string) => {
+      const result = await runtime.service.execute(leader(), { operation: 'draft', action, targets: [{ record_id: first.record_id, version: 1 }] })
+      expect(result.outcome, JSON.stringify(result)).toBe('success')
+      const rawDraft = result.draft as { draft_id: string; version: number }
+      const draft = { draft_id: rawDraft.draft_id, version: rawDraft.version }
+      expect((await runtime.service.execute(leader(), { operation: 'commit', ...draft })).error?.code).toBe('confirmation_required')
+      return runtime.service.execute(await authorize(draft), { operation: 'commit', ...draft })
+    }
+    expect((await lifecycle('deactivate')).record).toMatchObject({ record_id: first.record_id, status: 'inactive' })
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+    const original = await prisma.reflectionRecordEvidence.findFirstOrThrow({ where: { recordId: first.record_id } })
+    await prisma.sessionMessage.update({ where: { id: original.messageId! }, data: { content: '来源变化' } })
+    expect((await lifecycle('reactivate')).record).toMatchObject({ status: 'active', evidence_status: 'review_required' })
+    expect((await runtime.service.execute(leader(), { operation: 'search' })).count).toBe(0)
+  })
+
+  it('RF07/RF14 硬删阻止两会话旧草稿、旧保存幂等和迟到确认复活，展示回放只有占位', async () => {
+    const first = await save()
+    const stale = await newDraft({ action: 'revise', targets: [{ record_id: first.record_id, version: 1 }] })
+    const staleContext = await authorize(stale)
+    const display = await prisma.reflectionPresentation.findFirstOrThrow({ where: { draftId: stale.draft_id } })
+    const originalSession = sessionId
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'delete-other', title: '第二会话删除' } })).id
+    const result = await runtime.service.execute(leader(), { operation: 'draft', action: 'delete', targets: [{ record_id: first.record_id, version: 1 }] })
+    expect(result.outcome, JSON.stringify(result)).toBe('success')
+    const rawDraft = result.draft as { draft_id: string; version: number }
+      const draft = { draft_id: rawDraft.draft_id, version: rawDraft.version }
+    const context = await authorize(draft)
+    expect((await runtime.service.execute(context, { operation: 'commit', ...draft })).record).toMatchObject({ status: 'deleted' })
+    expect((await runtime.service.execute(staleContext, { operation: 'commit', ...stale })).outcome).toBe('failure')
+    expect(await runtime.service.getDisplay(ownerId, display.displayId)).toMatchObject({ deleted: true, body: null, evidence: [] })
+    expect(await runtime.service.draftBodyText(ownerId, stale.draft_id, 1)).toBeNull()
+    expect(await runtime.service.recordBodyText(ownerId, first.record_id, 1)).toBeNull()
+    expect((await runtime.service.execute(leader(), { operation: 'draft', action: 'reactivate', targets: [{ record_id: first.record_id, version: 1 }] })).outcome).toBe('failure')
+    expect(await prisma.reflectionRevision.count({ where: { recordId: first.record_id } })).toBe(0)
+    expect(await prisma.reflectionRecordEvidence.count({ where: { recordId: first.record_id } })).toBe(0)
+    expect(await prisma.reflectionRecord.findUnique({ where: { id: first.record_id } })).toMatchObject({ contentJson: '{}', title: '', generation: 2 })
+    sessionId = originalSession
+  })
+
+  it('RF15 注入时钟的启动清理清除30天未确认草稿/展示，过期授权不重签', async () => {
+    const draft = await newDraft()
+    const context = await authorize(draft)
+    const presentation = await prisma.reflectionPresentation.findFirstOrThrow({ where: { draftId: draft.draft_id } })
+    const cleanup = new ReflectionCleanupService(prisma, { clock: () => Date.now() + 31 * 86400000 })
+    await cleanup.processPending()
+    expect(await runtime.service.getDisplay(ownerId, presentation.displayId)).toMatchObject({ deleted: true, body: null })
+    expect(await runtime.service.draftBodyText(ownerId, draft.draft_id, 1)).toBeNull()
+    expect((await runtime.service.execute(context, { operation: 'commit', ...draft })).outcome).toBe('failure')
+    expect((await runtime.service.confirmTurn(context, classifierReturning('confirm'))).status).not.toBe('granted')
+    expect((await runtime.service.execute(leader(), { ...DRAFT, action: 'revise', draft_id: draft.draft_id, base_version: 1,
+      evidence: [{ message_id: (await seedAssistant('补充证据')).id, region: 'content', excerpt: '补充证据' }] })).outcome).toBe('failure')
+  })
+
+  it('RF15 每用户100活跃及滚动24小时100新建，撤回清副本也不重置新建额度', async () => {
+    const source = await seedAssistant('限额验证证据')
+    const input = { ...DRAFT, evidence: [{ message_id: source.id, region: 'content', excerpt: '限额验证证据' }] }
+    const drafts: { draft_id: string; version: number }[] = []
+    for (let i = 0; i < 100; i++) {
+      const result = await runtime.service.execute(leader(), input)
+      expect(result.outcome).toBe('success')
+      drafts.push(result.draft as { draft_id: string; version: number })
+    }
+    expect((await runtime.service.execute(leader(), input)).error?.code).toBe('limit')
+    const draft = drafts[0]
+    await runtime.service.execute(leader(), { operation: 'cancel', draft_id: draft.draft_id })
+    expect((await runtime.service.execute(leader(), input)).error?.code).toBe('limit')
+    const later = createReflectionsRuntime(prisma, { clock: () => Date.now() + 86400001 })
+    expect((await later.service.execute(leader(), input)).outcome).toBe('success')
+    expect((await later.service.execute(leader(), input)).error?.code).toBe('limit')
+    later.dispose()
+  })
+
+  it('RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文', async () => {
+    const first = await save()
+    const stale = await newDraft({ action: 'revise', targets: [{ record_id: first.record_id, version: 1 }] })
+    const context = await authorize(stale)
+    let entered!: () => void
+    let release!: () => void
+    const reached = new Promise<void>(resolve => { entered = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const delayed = createReflectionsRuntime(prisma, {}, { beforeCommitTransaction: async () => { entered(); await barrier } })
+    const saving = delayed.service.execute(context, { operation: 'commit', ...stale })
+    await reached
+    const originalSession = sessionId
+    const writer = createPrismaClient(process.env.DATABASE_URL!)
+    const other = createReflectionsRuntime(writer)
+    try {
+      sessionId = (await writer.session.create({ data: { ownerId, containerId: 'delete-race', title: '竞态删除' } })).id
+      const result = await other.service.execute(leader(), { operation: 'draft', action: 'delete', targets: [{ record_id: first.record_id, version: 1 }] })
+      const raw = result.draft as { draft_id: string; version: number }
+      const draft = { draft_id: raw.draft_id, version: raw.version }
+      const confirmation = await authorize(draft)
+      expect((await other.service.execute(confirmation, { operation: 'commit', ...draft })).outcome).toBe('success')
+    } finally {
+      sessionId = originalSession
+      release()
+      other.dispose()
+      await writer.$disconnect()
+    }
+    expect((await saving).outcome).toBe('failure')
+    expect(await runtime.service.recordBodyText(ownerId, first.record_id, 1)).toBeNull()
+    delayed.dispose()
+  })
+
+  it('RF14/RF15 幂等30天过期后仍能清初始草稿，独立合并派生记录保留', async () => {
+    const first = await save()
+    const second = await save()
+    const merged = await save({ action: 'merge', targets: [first, second].map(r => ({ record_id: r.record_id, version: 1 })) })
+    await new ReflectionCleanupService(prisma, { clock: () => Date.now() + 31 * 86400000 }).processPending()
+    expect(await prisma.reflectionIdempotency.count()).toBe(0)
+    const result = await runtime.service.execute(leader(), { operation: 'draft', action: 'delete', targets: [{ record_id: first.record_id, version: 1 }] })
+    const raw = result.draft as { draft_id: string; version: number }
+    const draft = { draft_id: raw.draft_id, version: raw.version }
+    expect((await runtime.service.execute(await authorize(draft), { operation: 'commit', ...draft })).outcome).toBe('success')
+    const search = await runtime.service.execute(leader(), { operation: 'search' })
+    expect(search.records).toMatchObject([{ record_id: merged.record_id }])
+    const original = await prisma.reflectionDraft.findFirstOrThrow({ where: { committedRecordId: first.record_id } })
+    expect(original.contentJson).toBe('{}')
+    expect(await prisma.reflectionPresentation.findMany({ where: { draftId: original.id } })).toMatchObject([{ status: 'deleted', bodyJson: '{}' }])
+  })
+
+  it('RF15 操作日志保留90天，账号删除清墓碑与清理队列且不产生孤儿副本', async () => {
+    const originalOwner = ownerId
+    const originalSession = sessionId
+    ownerId = (await seedUser(prisma, 'rf-delete-account', 'pw-delete-account-secure')).id
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'delete-account', title: '账号删除' } })).id
+    try {
+      const first = await save()
+      await new ReflectionCleanupService(prisma, { clock: () => Date.now() + 91 * 86400000 }).processPending()
+      expect(await prisma.reflectionEvent.count({ where: { ownerId } })).toBe(0)
+      expect(await prisma.reflectionRecord.count({ where: { id: first.record_id } })).toBe(1)
+      // 真实账号删除同时触发会话/消息级联与反思来源触发器。
+      await prisma.user.delete({ where: { id: ownerId } })
+      expect(await prisma.reflectionRecord.count({ where: { ownerId } })).toBe(0)
+      expect(await prisma.reflectionGrant.count({ where: { ownerId } })).toBe(0)
+      expect(await prisma.reflectionCleanupOutbox.count({ where: { ownerId } })).toBe(0)
+      expect(await prisma.reflectionDraft.count({ where: { ownerId } })).toBe(0)
+    } finally {
+      ownerId = originalOwner
+      sessionId = originalSession
+    }
+  })
+
+  it('RF07 停用再恢复仍改变 generation，旧 active 基准不能在状态绕回后生效', async () => {
+    const first = await save()
+    const stale = await newDraft({ action: 'revise', targets: [{ record_id: first.record_id, version: 1 }] })
+    const context = await authorize(stale)
+    const originalSession = sessionId
+    sessionId = (await prisma.session.create({ data: { ownerId, containerId: 'lifecycle-roundtrip', title: '停用与恢复' } })).id
+    try {
+      for (const action of ['deactivate', 'reactivate']) {
+        const result = await runtime.service.execute(leader(), { operation: 'draft', action, targets: [{ record_id: first.record_id, version: 1 }] })
+        const raw = result.draft as { draft_id: string; version: number }
+        const draft = { draft_id: raw.draft_id, version: raw.version }
+        expect((await runtime.service.execute(await authorize(draft), { operation: 'commit', ...draft })).outcome).toBe('success')
+      }
+    } finally { sessionId = originalSession }
+    const result = await runtime.service.execute(context, { operation: 'commit', ...stale })
+    expect(result.error?.code).toBe('conflict')
+    expect(result.differences).toMatchObject([{ expected_generation: 1, actual_generation: 3 }])
   })
 
 })

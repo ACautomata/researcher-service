@@ -133,4 +133,21 @@ describe('ReflectionBlock', () => {
     expect(ackReflectionDisplay).toHaveBeenCalledOnce()
   })
 
+  it('删除动作展示不可恢复边界，断线立即清正文，重连重读删除占位', async () => {
+    getReflectionDisplay.mockResolvedValue(displayWith({ action: 'delete' }))
+    const w = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
+    await flushPromises()
+    expect(w.text()).toContain('不可恢复')
+    expect(w.text()).toContain('外部导出')
+    window.dispatchEvent(new Event('reflections:disconnect'))
+    await flushPromises()
+    expect(w.find('[data-test="reflection-body"]').exists()).toBe(false)
+    getReflectionDisplay.mockResolvedValue(displayWith({ body: null, deleted: true, status: 'deleted' }))
+    window.dispatchEvent(new Event('reflections:refresh'))
+    await flushPromises()
+    expect(w.find('[data-test="reflection-deleted"]').exists()).toBe(true)
+    expect(w.text()).not.toContain('工具参数验证遗漏')
+    w.unmount()
+  })
+
 })

@@ -65,6 +65,7 @@ export function useEventStream(handlers: EventStreamHandlers): EventStream {
   function close(): void {
     closed = true
     status.value = 'closed'
+    window.dispatchEvent(new Event('reflections:disconnect'))
     source?.close()
     source = null
   }
@@ -95,6 +96,7 @@ export function useEventStream(handlers: EventStreamHandlers): EventStream {
         if (Number.isFinite(seq)) lastSeq = seq
         if (event.type === 'stream.opened') {
           status.value = 'open'
+          window.dispatchEvent(new Event('reflections:refresh'))
           handlers.onOpen?.()
         }
         // session.terminated 是 per-user 广播（无 sessionId）+ 服务端随帧关流——停重连，
@@ -111,12 +113,16 @@ export function useEventStream(handlers: EventStreamHandlers): EventStream {
         if (event.type === 'error') {
           console.warn('[event-stream] 服务端错误帧, code =', event.payload.code)
         }
+        if (['tool.end', 'run.completed', 'run.failed', 'session.invalidated'].includes(event.type)) {
+          window.dispatchEvent(new Event('reflections:refresh'))
+        }
         handlers.onEvent(event)
       })
     }
     next.onerror = () => {
       if (closed || source !== next) return
       status.value = 'disconnected'
+      window.dispatchEvent(new Event('reflections:disconnect'))
       handlers.onDisconnect?.()
       if (probing) return
       probing = true

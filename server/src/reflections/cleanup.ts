@@ -6,6 +6,7 @@
 //
 // 清理器是服务级基础设施，不建 Agent、不调用 LLM、不依赖 SSE。
 
+import { purgeDraftCopies } from './retention'
 import type { PrismaClient } from '../generated/prisma/client'
 import { scrubBodyJson, scrubEvidenceJson } from './content'
 import {
@@ -17,6 +18,7 @@ import {
 
 export interface ReflectionCleanupOptions {
   /** 启动即扫 + 周期扫描间隔（缺省 60s；父规格：TTL/清理每分钟）。 */
+  clock?: () => number
   intervalMs?: number
   batchSize?: number
   onError?: (err: unknown) => void
@@ -92,6 +94,7 @@ export class ReflectionCleanupService {
   }
 
   private async processBatch(limit: number): Promise<number> {
+    await this.pruneExpired()
     const rows = await this.prisma.reflectionCleanupOutbox.findMany({
       where: { state: 'pending' },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -120,6 +123,30 @@ export class ReflectionCleanupService {
       }
     }
     return processed
+  }
+
+  private async pruneExpired(): Promise<void> {
+    const now = new Date(this.options.clock?.() ?? Date.now())
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 86400000)
+    await this.prisma.$transaction(async tx => {
+      const expired = await tx.reflectionDraft.findMany({ where: { status: { in: ['preparing', 'pending', 'confirmed_pending_save'] }, createdAt: { lte: daysAgo(30) } } })
+      for (const draft of expired) await purgeDraftCopies(tx, draft.ownerId, [draft.id], now, 'expired')
+      const grants = await tx.reflectionGrant.findMany({ where: { status: 'active', expiresAt: { lte: now } } })
+      for (const grant of grants) {
+        await tx.reflectionGrant.update({ where: { id: grant.id }, data: { status: 'expired' } })
+        await tx.reflectionPresentation.updateMany({ where: { displayId: grant.displayId, status: { in: ['active', 'acked'] } }, data: { status: 'expired', revokedAt: now } })
+        await tx.reflectionDraft.updateMany({ where: { id: grant.draftId, status: 'confirmed_pending_save' }, data: { status: 'pending' } })
+      }
+      // 旧版本关系回填：清理幂等结果前保存专属草稿归属，后续删除仍能找到最初 create。
+      const results = await tx.reflectionIdempotency.findMany({ where: { createdAt: { lte: daysAgo(30) } } })
+      for (const result of results) {
+        const confirmationMessageId = result.key.slice(result.ownerId.length + 1)
+        const grant = await tx.reflectionGrant.findUnique({ where: { ownerId_confirmationMessageId: { ownerId: result.ownerId, confirmationMessageId } } })
+        if (grant) await tx.reflectionDraft.updateMany({ where: { id: grant.draftId, committedRecordId: null }, data: { committedRecordId: result.recordId } })
+      }
+      await tx.reflectionIdempotency.deleteMany({ where: { createdAt: { lte: daysAgo(30) } } })
+      await tx.reflectionEvent.deleteMany({ where: { createdAt: { lte: daysAgo(90) } } })
+    })
   }
 
   private async cleanupGroup(rows: readonly OutboxRow[]): Promise<void> {
