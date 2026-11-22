@@ -39,6 +39,20 @@ describe('#1081 确认识别器适配', () => {
     expect(sent).toContain('version')
   })
 
+  it('提示词把当前展示动作（合并/删除/修订等）纳入 confirm 语义，不只限保存草稿', async () => {
+    const model = new ScriptedChatModel([new AIMessage('{"decision":"confirm"}')])
+    await createReflectionConfirmationClassifier(model)({
+      ...INPUT,
+      userText: '确认合并上面列出的记录',
+      action: { ...ACTION, action: 'merge' },
+    })
+    const sent = JSON.stringify(model.receivedMessages[0])
+    expect(sent).toContain('当前展示的反思动作')
+    expect(sent).toContain('确认合并上面列出的记录')
+    expect(sent).toContain('merge')
+    expect(sent).toContain('不要因为动作名为 delete/merge/revise/replace')
+  })
+
   it('非法输出/未知分类 → ambiguous，不猜测确认', async () => {
     const invalid = new ScriptedChatModel([new AIMessage('我觉得可以')])
     expect((await createReflectionConfirmationClassifier(invalid)(INPUT)).decision).toBe('ambiguous')

@@ -1,0 +1,83 @@
+{
+  "synthetic": true,
+  "realModelCalls": 0,
+  "realDocker": false,
+  "sourceSessionId": "cmwr9x7zk0001sfzk2bun4rxr",
+  "currentSessionId": "cmwr9x7zu0002sfzkyb3vb0b9",
+  "records": {
+    "firstVersion": 2,
+    "first": "cmwr9xqjo000fsfzkenwvisp6",
+    "second": "cmwr9yilm001bsfzk5y0h5rgl",
+    "merged": "cmwr9yscl001psfzk7b64bu6z"
+  },
+  "modelCalls": 32,
+  "realRedis": false,
+  "recordsState": [
+    {
+      "id": "cmwr9xqjo000fsfzkenwvisp6",
+      "status": "superseded",
+      "evidenceStatus": "review_required",
+      "currentRevision": 2
+    },
+    {
+      "id": "cmwr9yilm001bsfzk5y0h5rgl",
+      "status": "superseded",
+      "evidenceStatus": "review_required",
+      "currentRevision": 1
+    },
+    {
+      "id": "cmwr9yscl001psfzk7b64bu6z",
+      "status": "deleted",
+      "evidenceStatus": "review_required",
+      "currentRevision": 1
+    }
+  ],
+  "displays": [
+    {
+      "displayId": "cmwr9xh96000asfzknxiqsfvo",
+      "draftId": "cmwr9xh800007sfzkgyykoumv",
+      "status": "revoked",
+      "ackedAt": "2026-11-22T03:25:10.371Z"
+    },
+    {
+      "displayId": "cmwr9xzfj000tsfzkggg4k06j",
+      "draftId": "cmwr9xzdf000qsfzkdlkb1t6u",
+      "status": "revoked",
+      "ackedAt": "2026-11-22T03:25:33.883Z"
+    },
+    {
+      "displayId": "cmwr9yati0016sfzksbuje9zb",
+      "draftId": "cmwr9yasq0014sfzkkhivvrbq",
+      "status": "revoked",
+      "ackedAt": "2026-11-22T03:25:48.557Z"
+    },
+    {
+      "displayId": "cmwr9yoad001ksfzkhhs23o83",
+      "draftId": "cmwr9yo9k001hsfzkmebzr7y6",
+      "status": "deleted",
+      "ackedAt": "2026-11-22T03:26:06.019Z"
+    },
+    {
+      "displayId": "cmwr9zrki001ysfzk4xnaqq59",
+      "draftId": "cmwr9zrj3001xsfzkfor085nw",
+      "status": "deleted",
+      "ackedAt": "2026-11-22T03:26:57.079Z"
+    }
+  ],
+  "source": "actual browser actions through production frontend + public HTTP/SSE/RunService; classifier and LLM scripted",
+  "steps": [
+    "history_read",
+    "draft_over_4KiB",
+    "inflight_evidence_bound",
+    "browser_full_render_ack",
+    "natural_confirmation_commit",
+    "new_session_search_read",
+    "revise_v2",
+    "create_second_record",
+    "merge_two_sources",
+    "delete_source_session_invalidation",
+    "reload_revalidation",
+    "confirmed_hard_delete",
+    "reload_deleted_placeholder"
+  ]
+}

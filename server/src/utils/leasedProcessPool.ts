@@ -44,6 +44,37 @@ interface Slot {
   ownerId?: string
 }
 
+function childIsAlive(child: ChildProcess): boolean {
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return false
+  try {
+    process.kill(child.pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+/** 子进程可能在 dispose 前已退出，或 exit 事件已在 SIGKILL 后错过；close 双监听 +
+ *  存活探测 + 短兜底避免 unref 进程池永久挂起（Node 事件循环空后静默退出 0）。 */
+function waitForChildExit(child: ChildProcess): Promise<void> {
+  if (!childIsAlive(child)) return Promise.resolve()
+  return new Promise<void>(resolveDone => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off('exit', finish)
+      child.off('close', finish)
+      resolveDone()
+    }
+    const timer = setTimeout(finish, 2_000)
+    child.once('exit', finish)
+    child.once('close', finish)
+    try { child.kill('SIGKILL') } catch { /* 已退出 */ }
+  })
+}
+
 function resolveChildScript(): string | undefined {
   const candidates: string[] = []
   try {
@@ -112,9 +143,7 @@ export class LeasedProcessPool {
   dispose(): Promise<void> {
     if (this.closing) return this.closing
     this.disposed = true
-    const exits = [...this.children].map(child => new Promise<void>(resolve => {
-      child.once('exit', () => resolve())
-    }))
+    const exits = [...this.children].map(waitForChildExit)
     for (const slot of this.slots) this.killSlot(slot)
     this.slots.length = 0
     this.leasesPerUser.clear()

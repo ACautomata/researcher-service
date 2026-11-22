@@ -898,6 +898,7 @@ export class ReflectionService {
     const status = evidence.every((e) => e.status === 'valid') ? 'pending' : 'preparing'
     const created = request.action === 'create' || request.targets !== undefined
       ? await this.store.createDraft({
+          ...(context.toolCallId ? { toolInput: { threadId: context.currentSessionId, toolCallId: context.toolCallId } } : {}),
           ownerId: context.ownerId,
           sessionId: context.currentSessionId,
           body: normalized.body,
@@ -914,6 +915,7 @@ export class ReflectionService {
           } } : {}),
         })
       : await this.store.reviseDraft({
+          ...(context.toolCallId ? { toolInput: { threadId: context.currentSessionId, toolCallId: context.toolCallId } } : {}),
           ownerId: context.ownerId,
           draftId: request.draft_id!,
           baseVersion: request.base_version!,
@@ -1022,6 +1024,7 @@ export class ReflectionService {
         : '确认后只恢复生命周期；待复核证据不会变为有效，仍不进入主动使用。',
       causes: [], improvements: [], scope: { labels: [], conditions: '', exclusions: '' } }
     const draft = await this.store.createDraft({ ownerId: context.ownerId, sessionId: context.currentSessionId,
+      ...(context.toolCallId ? { toolInput: { threadId: context.currentSessionId, toolCallId: context.toolCallId } } : {}),
       body, evidence: [], status: 'pending', action: request.action, targets })
     return success('draft', { draft: { draft_id: draft.id, version: draft.version, status: draft.status, action: draft.action,
       body_ref: reflectionDraftRef(draft.id, draft.version) }, confirmable: true }, '请 present 完整动作和目标，等待自然语言确认。')

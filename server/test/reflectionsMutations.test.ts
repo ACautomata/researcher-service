@@ -3,6 +3,9 @@
 // 覆盖父规格 I3/I5 的可观察行为：ack 早于确认消息才签 grant、含糊/否定/撤回不授权、伪造参数无效、
 // 同一确认消息重试/并发只产生一条正式记录、授权过窗与提交次数上限、已提交独立保留。
 
+import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages'
+import { randomUUID } from 'node:crypto'
+import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -155,6 +158,40 @@ describe('#1083 完整确认路径的正式记录变更', () => {
     expect(result.outcome, JSON.stringify(result)).toBe('success')
     return (result.record as { record_id: string; revision: number })
   }
+
+  it('RF14 首个工具结果落盘前关闭草稿，迟到快照/待写不能恢复输入；原生bytes与普通文本保留', async () => {
+    const source = await seedAssistant('用于验证首结果前窗口的原始失败')
+    const request = { ...DRAFT, problem: '首结果前关闭的专属正文', evidence: [{ message_id: source.id, region: 'content', excerpt: '用于验证首结果前窗口的原始失败' }] }
+    const created = await runtime.service.execute({ ...leader(), toolCallId: 'before-result' }, request)
+    expect(created.outcome, JSON.stringify(created)).toBe('success')
+    const draft = created.draft as { draft_id: string; version: number }
+    const saver = new PrismaCheckpointSaver(prisma)
+    const config = { configurable: { thread_id: sessionId } }
+    const checkpoint = { v: 4, id: randomUUID(), ts: new Date().toISOString(), channel_values: { messages: [new HumanMessage('用户自行引用：保持普通文本'), new AIMessage({ content: '', tool_calls: [{ id: 'before-result', name: 'reflection_records', args: request }] })] }, channel_versions: {}, versions_seen: {} }
+    await saver.put(config, checkpoint, { source: 'input', step: 0, parents: {} })
+    const other = await prisma.session.create({ data: { ownerId, containerId: 'binary-channel', title: '同owner二进制待写' } })
+    await saver.putWrites({ configurable: { thread_id: other.id, checkpoint_id: 'binary-only' } }, [['native-bytes', new Uint8Array([1, 2, 3])]], 'binary-task')
+    // 同用户无关的旧序列化数据不应被关闭目标草稿时全量解码。
+    await prisma.checkpoint.create({ data: { threadId: other.id, checkpointId: 'unrelated-legacy', type: 'legacy-opaque', blob: new Uint8Array([255, 0, 1]) } })
+    const legacy = await prisma.session.create({ data: { ownerId, containerId: 'legacy-fork', title: '未建立调用绑定的旧副本' } })
+    const legacyMessage = new AIMessage({ content: '', tool_calls: [{ id: 'legacy-only', name: 'reflection_records', args: request }] })
+    const legacyConfig = { configurable: { thread_id: legacy.id } }
+    const legacyId = randomUUID()
+    await saver.put(legacyConfig, { ...checkpoint, id: legacyId, channel_values: { messages: [legacyMessage] } }, { source: 'input', step: 0, parents: {} })
+    await saver.put(legacyConfig, { ...checkpoint, id: randomUUID(), channel_values: { messages: [legacyMessage, new ToolMessage({ tool_call_id: 'legacy-only', name: 'reflection_records', content: JSON.stringify({ draft: { draft_id: draft.draft_id, version: 1 } }) })] } }, { source: 'loop', step: 1, parents: {} })
+    expect((await runtime.service.execute(leader(), { operation: 'cancel', draft_id: draft.draft_id })).outcome).toBe('success')
+    const legacyBeforeResult = await saver.getTuple({ configurable: { thread_id: legacy.id, checkpoint_id: legacyId } })
+    expect(JSON.stringify(legacyBeforeResult)).not.toContain('首结果前关闭的专属正文')
+    const lateId = randomUUID()
+    const lateConfig = { configurable: { thread_id: sessionId, checkpoint_id: lateId } }
+    await saver.put(config, { ...checkpoint, id: lateId }, { source: 'update', step: 1, parents: {} })
+    await saver.putWrites(lateConfig, [['messages', checkpoint.channel_values.messages], ['native-bytes', new Uint8Array([4, 5, 6])]], 'late-before-result')
+    const saved = await saver.getTuple(lateConfig)
+    expect(saved).toBeDefined()
+    expect(JSON.stringify(saved)).not.toContain('首结果前关闭的专属正文')
+    expect(JSON.stringify(saved)).toContain('用户自行引用：保持普通文本')
+    expect(saved!.pendingWrites?.find(write => write[1] === 'native-bytes')?.[2]).toEqual(new Uint8Array([4, 5, 6]))
+  })
 
   it('RF10 修订正式记录：同 record 新 revision，元数据也须完整展示确认', async () => {
     const first = await save()

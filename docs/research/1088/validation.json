@@ -1,0 +1,236 @@
+{
+  "date": "2026-11-22",
+  "timezone": "Asia/Singapore",
+  "code_commit": "ecc2ef175a4d91403ef04f60986aa36ae3e26229",
+  "evaluation_commit": "f61a21a66d2a9700cbafb7778c3ded4669021de7",
+  "evaluation_branch": "codex/1088-model-eval",
+  "production_tools_enabled": false,
+  "release_status": "model_analysis_gate_failed",
+  "server": {
+    "typecheck": "passed",
+    "build": "passed",
+    "full_test": {
+      "success": false,
+      "passed": 2222,
+      "failed": 1,
+      "skipped": 0,
+      "total": 2223,
+      "passed_files": 197,
+      "total_files": 198,
+      "failed_files": [
+        "/Users/jrz/Documents/researcher-service/server/test/chaoxingCommands.test.ts"
+      ],
+      "report_sha256": "f3b40185af6378e2f0a8e9edcb66a59f6499a38842c5b3aad1ede1211e3cc93e",
+      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npm test -- --reporter=json --outputFile=/tmp/rf-server-model-eval-v3b.json",
+      "status": "failed_unrelated_flaky_session_tests"
+    },
+    "sandbox_oom_recheck": {
+      "success": true,
+      "passed": 5,
+      "failed": 0,
+      "total": 5,
+      "report_sha256": "f540c1de4ff43a19d0d695a0b59227cfef6da53c990f85b31f72638e24e3cba8",
+      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npx vitest run test/sandboxSmoke.test.ts --reporter=json --outputFile=/tmp/rf-sandbox-v3.json"
+    },
+    "unrelated_flaky_rechecks": {
+      "sessionsApi": {
+        "success": true,
+        "passed": 55,
+        "failed": 0,
+        "report_sha256": "ab0f4308e51b361c61d5f2dc4fa4ba24183264f691d8138d139b710330f90328",
+        "command": "npx vitest run test/sessionsApi.test.ts --reporter=json --outputFile=/tmp/rf-sessionsapi-recheck.json"
+      },
+      "chaoxingCommands": {
+        "success": true,
+        "passed": 18,
+        "failed": 0,
+        "report_sha256": "fbbf8ff973fdb7823bc0f1ebb24e3b5319f193fdcfe037c44e8fd0e608e94998",
+        "command": "npx vitest run test/chaoxingCommands.test.ts --reporter=json --outputFile=/tmp/rf-chaoxing-recheck.json"
+      },
+      "note": "Two full runs each exposed a different unrelated flaky file (#1039 sessionsApi, then chaoxingCommands); both files pass in isolation. Neither touches this task's changed modules."
+    },
+    "prior_failure_history": "Field runs before this work had the same existing sandboxSmoke OOM container-liveness failure; the isolated file passes 5/5. The full run is recorded as not green."
+  },
+  "frontend": {
+    "test": {
+      "success": true,
+      "passed": 1003,
+      "failed": 0,
+      "skipped": 0,
+      "total": 1003,
+      "passed_files": 85,
+      "total_files": 85,
+      "report_sha256": "de9447c7d72dc498794698bfe75e36776b5c7fe81cbfecc0629024cc3211e115",
+      "command": "npm run test -- --reporter=json --outputFile=/tmp/rf-frontend-model-eval.json"
+    },
+    "build": "passed"
+  },
+  "matrix": {
+    "ids": 118,
+    "all_mapped_tests_observed_passed": true,
+    "missing_ids": [],
+    "unverified_ids": [],
+    "evidence": "coverage.json",
+    "scope": "test_evidence_only"
+  },
+  "analysis_scenarios": {
+    "constructed": 30,
+    "tested": 30,
+    "scenarioConstructionComplete": true,
+    "test": "reflectionAnalysisFixtures.test.ts"
+  },
+  "browser_e2e": {
+    "status": "passed",
+    "evidence": "evidence/browser-workflow.json",
+    "model": "scripted",
+    "real_model_calls": 0
+  },
+  "container_manual_smoke": {
+    "status": "passed",
+    "evidence": "evidence/container-workflow.json",
+    "real_docker": true,
+    "real_redis": true,
+    "model": "scripted",
+    "real_model_calls": 0,
+    "screenshot": "evidence/container-replay.jpg"
+  },
+  "cleanup_capacity": {
+    "status": "passed",
+    "evidence": "evidence/cleanup-benchmark.json",
+    "scope": "128 MiB synthetic local measurement; not an unbounded production capacity claim"
+  },
+  "model_evaluation": {
+    "status": "reviewed",
+    "provider": "DeepSeek (openai-compatible wire)",
+    "protocol": "openai",
+    "model": "deepseek-v4-flash",
+    "model_version": "deepseek-flash",
+    "base_url_host": "api.deepseek.com",
+    "prompt_version": "rf-t10-v3",
+    "harness_sha256": "8292d629e2eafc15ca0984c7eb2b86fc77f0d325051c21cc77a936bd5d12b8a5",
+    "confirmation_context": [
+      "请先完整展示草稿。"
+    ],
+    "sampling": {
+      "temperature": 0,
+      "thinking": "disabled",
+      "confirmation_max_tokens": 500,
+      "analysis_max_tokens": 6000
+    },
+    "request_timeout_ms": 120000,
+    "analysis_recursion_limit": 20,
+    "sampling_verification": {
+      "confirmation_requests_observed": 180,
+      "confirmation_verified": true,
+      "analysis_requests_observed": 480,
+      "analysis_verified": true
+    },
+    "budget": {
+      "authorized_total": 1450,
+      "observed_total": 1434,
+      "confirmation_v1_requests": 180,
+      "confirmation_pilot_requests": 12,
+      "confirmation_v2_requests": 180,
+      "analysis_v1_requests": 480,
+      "analysis_pilot_requests": 68,
+      "analysis_v3_main_requests": 480,
+      "analysis_v3_supplement_requests": 34,
+      "analysis_v3_formal_requests": 514,
+      "analysis_exhausted": false,
+      "note": "Observed total counts every formal and calibration request reported by the harnesses; diagnostics were capped separately. Analysis v3 merged 5 budget-blocked samples from a bounded supplement; only request_budget_exhausted samples were replaced."
+    },
+    "reviewer": "Claude Code (deepseek-v4.1-flash)",
+    "reviewer_model_version": "deepseek-v4.1-flash",
+    "review_method": "ai_delegate",
+    "human_review_performed": false,
+    "authorization_change": "User explicitly instructed Claude Code to replace the originally designated named human reviewer for per-sample scoring on 2026-11-22; named human review was not performed.",
+    "confirmation": {
+      "samples": 180,
+      "reviewed": 180,
+      "positives": 60,
+      "correct": 60,
+      "rate": 1,
+      "false_confirms": 0,
+      "decision_distribution": {
+        "confirm": 60,
+        "reject": 24,
+        "withdraw": 9,
+        "revise": 16,
+        "ambiguous": 43,
+        "unrelated": 28
+      },
+      "execution_errors": 0,
+      "violations": 0,
+      "gate_passed": true,
+      "gate_reasons": [],
+      "evidence": "model-eval/confirmation-reviewed-v2.json",
+      "gate_evidence": "model-eval/gate-confirmation-v2.json",
+      "history": {
+        "v1": {
+          "rate": 0.8333333333333334,
+          "gate_passed": false,
+          "evidence": "model-eval/confirmation-reviewed.json",
+          "gate_evidence": "model-eval/gate-confirmation.json"
+        }
+      }
+    },
+    "analysis": {
+      "samples": 90,
+      "reviewed": 90,
+      "completed": 83,
+      "failed": 7,
+      "execution_errors": 7,
+      "violations": 0,
+      "drafts_created": 20,
+      "evidence_support_two_and_total_ge_8": 84,
+      "rate": 0.9333333333333333,
+      "disposition_matched": 63,
+      "budget_exhausted": false,
+      "gate_passed": false,
+      "gate_reasons": [
+        "RF-AN-11:execution_error",
+        "RF-AN-11:incomplete_execution",
+        "RF-AN-16:execution_error",
+        "RF-AN-16:incomplete_execution",
+        "RF-AN-19:execution_error",
+        "RF-AN-19:incomplete_execution",
+        "RF-AN-26:execution_error",
+        "RF-AN-26:incomplete_execution",
+        "RF-AN-29:execution_error",
+        "RF-AN-29:incomplete_execution"
+      ],
+      "evidence": "model-eval/analysis-reviewed-v3.json",
+      "history": {
+        "v1": {
+          "rate": 0.8,
+          "good": 72,
+          "gate_passed": false,
+          "evidence": "model-eval/analysis-reviewed.json",
+          "gate_evidence": "model-eval/gate-analysis.json"
+        }
+      }
+    },
+    "evidence": {
+      "method": "model-eval/README.md",
+      "rubric": "model-eval/analysis-scoring-rubric.md",
+      "confirmation_semantics": "model-eval/confirmation-semantics.json",
+      "analysis_anchors": "model-eval/analysis-disposition-anchors.json",
+      "failed_attempts": [
+        "model-eval/analysis-attempt1-empty.json",
+        "model-eval/analysis-attempt2-empty.json"
+      ],
+      "analysis_v3_main": "model-eval/analysis-run-v3-main.json",
+      "analysis_v3_supplement": "model-eval/analysis-run-v3-supplement.json"
+    }
+  },
+  "remaining": [
+    "analysis_gate_blocked_by_7_model_execution_failures_an_11_16_19_26_29",
+    "server_full_run_has_1_unrelated_flaky_test_failures_both_files_pass_in_isolation",
+    "production_tools_remain_unassembled"
+  ],
+  "regression_note": "Two full runs each exposed a different unrelated flaky file (#1039 sessionsApi first, then chaoxingCommands); both pass in isolation (55/55 and 18/18). The full run is not recorded as green.",
+  "review": {
+    "Standards": "no_remaining_findings",
+    "Spec": "confirmation v2 passed; analysis quality and zero-tolerance passed but 7 execution failures block; AI delegate replaced named human review; production remains disabled"
+  }
+}

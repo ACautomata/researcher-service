@@ -1,0 +1,19 @@
+{
+  "status": "not_run",
+  "kind": "confirmation",
+  "reviewer": "jrz",
+  "commit": "72429bababf21c9cfbde542ab77a1f193aadeb50",
+  "fixtureSha256": "1a4d69195450f247f45aa9e56cb94d29261eeeb95a79acdbcc818f810798e36a",
+  "promptSha256": "4250c6aa2072b4924a6cb181c09f52b3a928a241af0eab54ded1128e0c889f08",
+  "promptVersion": "rf-confirmation-1088-v1",
+  "provider": "openai",
+  "model": null,
+  "modelVersion": null,
+  "sampling": {
+    "temperature": 0,
+    "maxTokens": 500
+  },
+  "runs": [],
+  "reason": "user_requested_skip",
+  "scenarioConstructionComplete": true
+}

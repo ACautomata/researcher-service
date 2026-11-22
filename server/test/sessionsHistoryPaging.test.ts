@@ -111,7 +111,7 @@ describe('session_history（RF-T02）', () => {
   })
   afterAll(async () => { await app.cleanup() })
 
-  it('C7/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定', async () => {
+  it('C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定', async () => {
     const history = service({ pageItems: 2 })
     const request: ReadRequest = { operation: 'read', targets: [{ session_id: 'multi' }, { session_id: 'gappy', range: { from_turn: 2, to_turn: 8 } }] }
     const results = await pages(history, request)

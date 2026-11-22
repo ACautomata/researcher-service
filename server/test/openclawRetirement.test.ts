@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -120,6 +121,8 @@ describe('server/README.md（#860：目录树/接缝零 fleet 现役描述）', 
 const SCAN_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', 'generated'])
 
 function walkFiles(dir: string): string[] {
+  // 只审查当前仓库；嵌套checkout/worktree有自己的.git文件或目录。
+  if (dir !== ROOT && existsSync(join(dir, '.git'))) return []
   const out: string[] = []
   for (const name of readdirSync(dir)) {
     if (SCAN_SKIP_DIRS.has(name)) continue
@@ -229,8 +232,8 @@ describe('#861 终局闸：全仓 openclaw 叙述仅剩档案级与退役注记'
   const SCAN_EXT = /\.(ts|tsx|mjs|cjs|js|md|yml|yaml|json|vue|html|sh|prisma|sql|css)$/
 
   it('命中文件全部落在档案/注记白名单内', () => {
-    const hits = walkFiles(ROOT)
-      .map(rel)
+    // Git作用域排除被忽略的代理运行产物及嵌套工作区，同时保留未提交的新源码。
+    const hits = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(Boolean)
       .filter((r) => SCAN_EXT.test(r) || r === 'Dockerfile' || r === '.gitignore')
       .filter((r) => readRepoFile(r).match(/openclaw/i))
     const unexpected = hits.filter((r) => !ALLOWED.some((re) => re.test(r)))

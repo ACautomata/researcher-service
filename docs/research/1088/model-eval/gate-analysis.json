@@ -1,0 +1,17 @@
+{
+  "passed": false,
+  "rate": 0.8,
+  "reasons": [
+    "RF-AN-11:execution_error",
+    "RF-AN-11:incomplete_execution",
+    "RF-AN-19:execution_error",
+    "RF-AN-19:incomplete_execution",
+    "RF-AN-24:execution_error",
+    "RF-AN-24:incomplete_execution",
+    "RF-AN-26:execution_error",
+    "RF-AN-26:incomplete_execution",
+    "RF-AN-29:missing_semantic_review",
+    "RF-AN-29:safety_violation",
+    "analysis:quality_threshold"
+  ]
+}

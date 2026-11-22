@@ -1,3 +1,4 @@
+import { redactProductToolInputs } from '../reflections/checkpointCopies'
 import { parseSavedProduct } from './productMessage'
 import type { BackgroundExecService } from '../runner/background/service'
 import { parseSlash, BUILTIN_COMMANDS } from '../plugins/slash'
@@ -817,15 +818,15 @@ export class SessionService {
   // #747 B 节双域（R2 修复②）：同路径补 text_trace_logs 写——「mapper 写两份、代码不共享」，
   // TextTrace 行构造见 recordTextTraceForTurn（与上方 session_messages 行构造零共享）。----
   async recordTurn(p: RecordTurnPayload): Promise<string> {
-    const saved = await this.deps.prisma.$transaction(tx => insertNextTurn(tx, p.sessionId, {
-      role: 'assistant',
-      content: p.aggregate.content,
-      anchorCheckpointId: p.anchorCheckpointId,
-      attachmentsJson: serializeAttachments({
+    const saved = await this.deps.prisma.$transaction(async tx => {
+      const attachmentsJson = await redactProductToolInputs(tx, p.sessionId, serializeAttachments({
         ...p.aggregate,
         ...(p.presentations !== undefined && p.presentations.length > 0 ? { presentations: [...p.presentations] } : {}),
-      }),
-    }))
+      }))
+      return insertNextTurn(tx, p.sessionId, {
+        role: 'assistant', content: p.aggregate.content, anchorCheckpointId: p.anchorCheckpointId, attachmentsJson,
+      })
+    })
     await this.recordTextTraceForTurn(p)
     await this.autoTitle(p.sessionId)
     const child = await this.deps.prisma.teammate.findUnique({ where: { threadId: p.sessionId }, select: { parentSessionId: true } })
@@ -1215,6 +1216,8 @@ export class SessionService {
   ): Promise<void> {
     const rows = anchor !== null ? await this.listHistoryRows(source.id) : []
     await this.deps.prisma.$transaction(async (tx) => {
+      const inputLinks = await tx.reflectionToolInputLink.findMany({ where: { threadId: source.id, ownerId: source.ownerId } })
+      if (inputLinks.length) await tx.reflectionToolInputLink.createMany({ data: inputLinks.map(link => ({ ...link, threadId: forkedSessionId })) })
       // 复制消息行 id 映射（源 id → 新 id）：attachments.messageId 挂靠改指用。
       const messageIdMap = new Map<string, string>()
       if (anchor !== null) {

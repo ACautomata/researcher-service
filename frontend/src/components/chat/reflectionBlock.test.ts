@@ -60,7 +60,7 @@ describe('ReflectionBlock', () => {
     vi.restoreAllMocks()
   })
 
-  it('渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack', async () => {
+  it('RF04 渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack', async () => {
     getReflectionDisplay.mockResolvedValue(displayWith())
     const w = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
     await flushPromises()
@@ -148,6 +148,14 @@ describe('ReflectionBlock', () => {
     expect(w.find('[data-test="reflection-deleted"]').exists()).toBe(true)
     expect(w.text()).not.toContain('工具参数验证遗漏')
     w.unmount()
+  })
+
+  it('RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash', async () => {
+    getReflectionDisplay.mockResolvedValue(displayWith({ bodyHash: 'b'.repeat(64) }))
+    const wrapper = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
+    await flushPromises()
+    expect(ackReflectionDisplay).toHaveBeenCalledWith('disp-1', { version: 2, hash: 'b'.repeat(64), messageId: 'msg-1' })
+    wrapper.unmount()
   })
 
 })

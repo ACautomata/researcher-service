@@ -19,9 +19,21 @@
 // 19→20 #1079 历史主请求额度账本 history_request_budgets（additive）；#1080 RF-T04 reflections
 // 草稿链路四表（additive）。20→21 #1081 RF-T05 正式记录/不可变 revision/确认授权/幂等结果四表。
 // 21→22 #1082 RF-T06 记录检索额度账本 + #1084 RF-T08 证据失效两表（均 additive）。
-export const SCHEMA_VERSION = 24
+// 24→25 #1088：无正文的反思工具调用绑定/删除墓碑（additive）。
+export const SCHEMA_VERSION = 25
 
 export function runIncrementalSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS "reflection_tool_input_links" (
+    "ownerId" TEXT NOT NULL REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    "threadId" TEXT NOT NULL REFERENCES "sessions"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    "toolCallId" TEXT NOT NULL,
+    "draftId" TEXT,
+    "draftVersion" INTEGER,
+    "redacted" BOOLEAN NOT NULL DEFAULT false,
+    PRIMARY KEY ("threadId", "toolCallId")
+  );
+  CREATE INDEX IF NOT EXISTS "reflection_tool_input_links_ownerId_idx" ON "reflection_tool_input_links"("ownerId");`)
+
   db.exec(`-- 无内容安全日志；独立于90天访问事件保留期，备份链存续期间不清理。
 CREATE TABLE IF NOT EXISTS reflection_recovery_state (
  id TEXT PRIMARY KEY, lineage TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0

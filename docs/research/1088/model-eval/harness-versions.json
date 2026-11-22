@@ -1,0 +1,23 @@
+{
+  "note": "已登记的真实评测 harness（reflection-model-eval.ts）指纹。报告记录运行时指纹；检查器要求报告指纹与本清单成员一致，且当前脚本指纹也已登记，避免后续改动绕过指纹复核。新增/修改 harness 时必须在此登记并说明用途。",
+  "versions": [
+    {
+      "id": "rf-eval-harness-2",
+      "sha256": "8292d629e2eafc15ca0984c7eb2b86fc77f0d325051c21cc77a936bd5d12b8a5",
+      "usedBy": ["confirmation v2"],
+      "note": "确认 v2 运行时的 harness：中性 confirmationContext、报文参数校验、硬预算、模型版本采集。"
+    },
+    {
+      "id": "rf-eval-harness-3",
+      "sha256": "e3ed832c036b06f792995c1fb256ec173da6b300e88cd637c471c54778eaac9b",
+      "usedBy": ["analysis v3"],
+      "note": "在 v2 基础上增加 RF_EVAL_CASE_IDS/RF_EVAL_REPETITIONS 校准选择、canary 可见输出扫描、脱敏感知证据核验。"
+    },
+    {
+      "id": "rf-eval-harness-4",
+      "sha256": "38ed755791e5e23413d088db2817ef527b026929a5d053058b5b82288ce444f7",
+      "usedBy": ["analysis v4", "current"],
+      "note": "在 v3 基础上将分析评测 RunService recursionLimit 从 20 放宽至 45（生产默认 500），避免完整走完检索+起草+present+收尾时被 20 步护栏提前截断。"
+    }
+  ]
+}

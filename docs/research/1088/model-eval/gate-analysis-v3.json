@@ -1,0 +1,16 @@
+{
+  "passed": false,
+  "rate": 0.9333333333333333,
+  "reasons": [
+    "RF-AN-11:execution_error",
+    "RF-AN-11:incomplete_execution",
+    "RF-AN-16:execution_error",
+    "RF-AN-16:incomplete_execution",
+    "RF-AN-19:execution_error",
+    "RF-AN-19:incomplete_execution",
+    "RF-AN-26:execution_error",
+    "RF-AN-26:incomplete_execution",
+    "RF-AN-29:execution_error",
+    "RF-AN-29:incomplete_execution"
+  ]
+}

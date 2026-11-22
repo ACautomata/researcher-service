@@ -38,7 +38,11 @@ function adminHtmlFallback(): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue(), adminHtmlFallback()],
+  plugins: [vue(), adminHtmlFallback(), ...(process.env.VITE_ACCEPTANCE_FIXTURE === '1' ? [{
+    name: 'acceptance-environment-banner',
+    apply: 'serve' as const,
+    transformIndexHtml: () => [{ tag: 'div', attrs: { id: 'acceptance-environment', style: 'position:fixed;z-index:99999;top:0;left:0;right:0;background:#ffec99;color:#302600;padding:6px;text-align:center;font:14px sans-serif;pointer-events:none' }, children: '本地验收测试环境 · 仅合成数据 · 脚本模型 · 未调用真实模型 API', injectTo: 'body-prepend' as const }],
+  }] : [])],
   resolve: {
     // KaTeX 的 CJS/UMD 产物被依赖预构建时会损坏 tokenRegex 里的代理区范围
     // （\uD800-\uDBFF 变成 U+FFFD），导致所有 \命令 被拆成普通字符、公式显示为源码。

@@ -2274,7 +2274,7 @@ export class RunService {
   private runtimeMiddleware(threadId: string): AnyAgentMiddleware[] {
     // #792：plugins 面也依赖 toolCallContext ALS（figures 去重身份 = 真实 tool_call_id，
     // tools.ts 同源读取）——四依赖 + plugins 任一存在即挂链。
-    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal && !this.deps.plugins && !this.deps.background) return []
+    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal && !this.deps.plugins && !this.deps.background && !this.deps.reflections) return []
     return [
       createToolCallContextMiddleware(),
       ...(this.deps.teammates ? [teammateDelegation] : []),

@@ -343,7 +343,7 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
     expect(await prisma.reflectionGrant.count({ where: { ownerId } })).toBe(0)
   })
 
-  it('模型伪造 approved/grantToken 等字段被 schema 拒绝', async () => {
+  it('RF06 模型伪造 approved/grantToken 等字段被 schema 拒绝', async () => {
     const display = await seedPresentation()
     const message = await seedUserMessage('保存')
     expect((await runtime.service.confirmTurn(leader(message.id), classifierReturning('confirm'))).status).toBe('granted')
@@ -485,7 +485,7 @@ describe('#1081 反思确认授权与正式保存（真实 SQLite）', () => {
     expect(await prisma.reflectionRecord.count({ where: { ownerId } })).toBe(0)
   })
 
-  it('正式提交事件写失败 → 整笔回滚；随后正常重试可保存', async () => {
+  it('RF18 正式提交事件写失败 → 整笔回滚；随后正常重试可保存', async () => {
     const display = await seedPresentation()
     const message = await seedUserMessage('确认保存')
     expect((await runtime.service.confirmTurn(leader(message.id), classifierReturning('confirm'))).status).toBe('granted')

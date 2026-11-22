@@ -29,7 +29,14 @@ describe('session_history 参数合同', () => {
   it('C5/C11：带时区且合法的日历时间', () => {
     expect(SessionHistorySchema.safeParse({ operation: 'search', time: { from: '2024-02-29T00:00:00+08:00' } }).success).toBe(true)
   })
-  it.each(['[', '(a+)+', '(a|aa)+', '(?=x)', '(x)\\1', 'a{1,1001}'])('C6：非法或危险正则明确报参数错误 %s', text => {
+  it.each(['[', '(a+)+', '(a|aa)+', '(?=x)', '(x)\\1', 'a{1,1001}'])('C6/B17：非法或危险正则明确报参数错误 %s', text => {
     expect(SessionHistorySchema.safeParse({ operation: 'search', query: { text, mode: 'regex' } }).success).toBe(false)
   })
+  it('B15/B17：文本按 Unicode 码点限长，正则超限拒绝且不静默截短', () => {
+    expect(SessionHistorySchema.safeParse({ operation: 'search', query: { text: '😀'.repeat(1024) } }).success).toBe(true)
+    expect(SessionHistorySchema.safeParse({ operation: 'search', query: { text: '😀'.repeat(1025) } }).success).toBe(false)
+    expect(SessionHistorySchema.safeParse({ operation: 'search', query: { text: 'a'.repeat(256), mode: 'regex' } }).success).toBe(true)
+    expect(SessionHistorySchema.safeParse({ operation: 'search', query: { text: 'a'.repeat(257), mode: 'regex' } }).success).toBe(false)
+  })
+
 })

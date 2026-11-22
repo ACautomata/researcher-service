@@ -50,7 +50,7 @@ describe('session_history（RF-T01）', () => {
     expect(await history.execute({ ...context, role: 'subagent' }, { operation: 'search' }))
       .toMatchObject({ outcome: 'failure', error: { category: 'permission' } })
   })
-  it('C2/C3/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息', async () => {
+  it('C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息', async () => {
     const result = await history.execute(context, { operation: 'read', targets: [{ session_id: 'old' }, { session_id: 'foreign' }] })
     expect(result.outcome).toBe('partial_success')
     expect(result.groups[0]?.messages).toEqual([expect.objectContaining({ session_id: 'old', message_id: 'old-msg', turn: 1, content: 'Alpha 研究 a.b', thinking: '独立推理', tools: [expect.objectContaining({ toolCallId: 'call-1', truncated: true })], media: [expect.objectContaining({ attachmentId: 'ref-1' })], source_truncated: true, missing: [] })])

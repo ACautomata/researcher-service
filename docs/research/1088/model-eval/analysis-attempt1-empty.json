@@ -1,0 +1,29 @@
+{
+  "status": "not_run",
+  "kind": "analysis",
+  "reviewer": null,
+  "reviewMethod": "ai_delegate",
+  "reviewerModelVersion": null,
+  "reviewAuthorization": {
+    "change": "named_human_review_replaced_by_ai_delegate",
+    "authorizedBy": "jrz",
+    "authorizationDate": "2026-11-22",
+    "basis": "explicit_user_instruction_in_session",
+    "humanReviewPerformed": false
+  },
+  "commit": "9ab5ffaa713372ccdfb313e7505ea6ab439a7836",
+  "fixtureSha256": "20653c9052946cb56d6480c2e2d267de2e2a624cc0cdce3c5a50a32d5b74a9d9",
+  "promptSha256": "a003da321dfd08a545147cc1173860de3ba5950d9a815d1fdfd06307b240577d",
+  "promptVersion": "rf-t10-v1",
+  "provider": "openai",
+  "model": "deepseek-v4-flash",
+  "modelVersion": null,
+  "modelVersions": [],
+  "scenarioConstructionComplete": true,
+  "sampling": {
+    "temperature": 0,
+    "maxTokens": 6000,
+    "thinking": "disabled"
+  },
+  "runs": []
+}
