@@ -14,5 +14,6 @@
     "maxTokens": 500
   },
   "runs": [],
-  "reason": "missing_credentials_or_model_configuration"
+  "reason": "user_requested_skip",
+  "scenarioConstructionComplete": true
 }

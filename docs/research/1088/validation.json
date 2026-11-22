@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-22",
+  "timezone": "Asia/Singapore",
+  "code_commit": "f168bba",
+  "production_tools_enabled": false,
+  "release_status": "blocked",
+  "server": {
+    "typecheck": "passed",
+    "build": "passed",
+    "full_test": {
+      "status": "failed_environment",
+      "command": "npm test -- --reporter=json --outputFile=/tmp/1088-final-all-results.json",
+      "passed": 2162,
+      "failed": 1,
+      "skipped": 19,
+      "total": 2182,
+      "passed_files": 189,
+      "total_files": 195,
+      "failed_files": [
+        "backgroundExecDockerSmoke.test.ts",
+        "dockerArchiveBackendSmoke.test.ts",
+        "openclawRetirement.test.ts",
+        "sandboxSmoke.test.ts",
+        "wikiContainerSmoke.test.ts",
+        "wikiDocsPortSmoke.test.ts"
+      ],
+      "report_sha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+      "reasons": [
+        "five_docker_smoke_files_require_missing_socket",
+        "existing_retirement_scan_matches_nested_worktrees"
+      ]
+    }
+  },
+  "frontend": {
+    "test": "passed",
+    "test_files": 85,
+    "tests": 1002,
+    "build": "passed"
+  },
+  "matrix": {
+    "ids": 118,
+    "all_mapped_tests_observed_passed": true,
+    "missing_ids": [],
+    "evidence": "coverage.json",
+    "scope": "test_evidence_only"
+  },
+  "model_evaluation": {
+    "status": "not_run",
+    "reason": "user_requested_skip",
+    "api_calls": 0,
+    "reviewer_designated": "jrz",
+    "actual_human_scoring": "not_performed"
+  },
+  "browser_e2e": "not_run",
+  "container_manual_smoke": "not_run",
+  "remaining": [
+    "analysis_scenario_state_construction_incomplete",
+    "large_history_cleanup_performance_unverified",
+    "real_model_sampling_and_named_human_review_skipped",
+    "browser_e2e_and_container_manual_smoke_not_executed"
+  ],
+  "review": {
+    "Standards": "no_remaining_confirmed_safety_defects",
+    "Spec": "automated_fixes_reviewed_release_acceptance_incomplete",
+    "resource_note": "legacy cleanup scans all owner checkpoints/writes/product messages; full scale short-transaction performance not proven"
+  }
+}
