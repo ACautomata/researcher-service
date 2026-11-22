@@ -4,6 +4,7 @@
 // dbPath 存在时装配真实只读执行器 + 独立主请求额度账本；缺省保持草稿链路内部接缝。
 
 import type { PrismaClient } from '../generated/prisma/client'
+import { redactedReflectionToolCallIds } from './checkpointCopies'
 import { PrismaReflectionStore } from './prismaAdapter'
 import { PrismaReflectionBudgetLedger } from './budgetLedger'
 import { ProcessReflectionQuery } from './query'
@@ -18,6 +19,7 @@ export interface ReflectionsRuntimeOptions extends Omit<ReflectionServiceOptions
 }
 
 export interface ReflectionsPort {
+  redactedToolCallIds?: (context: import('./model').ReflectionContext) => Promise<string[]>
   resolveRunRequest?: PrismaReflectionBudgetLedger['resolveRunRequest']
   analysisCompleted: PrismaReflectionStore['analysisCompleted']
   completeAnalysis: PrismaReflectionStore['completeAnalysis']
@@ -57,6 +59,7 @@ export function createReflectionsRuntime(
     ...(budget ? { budget } : {}),
   })
   const port: ReflectionsPort = {
+    redactedToolCallIds: context => redactedReflectionToolCallIds(prisma, context.ownerId, context.currentSessionId),
     resolveRunRequest: input => ledger.resolveRunRequest(input),
     analysisCompleted: context => store.analysisCompleted(context),
     completeAnalysis: context => store.completeAnalysis(context),

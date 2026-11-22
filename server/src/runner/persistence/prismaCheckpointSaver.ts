@@ -15,6 +15,7 @@
 //   - getDeltaChannelHistory 不 override——基类默认实现经 getTuple+parentConfig walk，
 //     零侵入接入（beta 契约，随 SDK 演进）。
 
+import { redactCheckpointWrite, withReflectionInputFence } from '../../reflections/checkpointCopies'
 import { BaseCheckpointSaver, WRITES_IDX_MAP, copyCheckpoint, getCheckpointId } from '@langchain/langgraph-checkpoint'
 import type {
   Checkpoint,
@@ -46,12 +47,6 @@ const WRITES_THREAD_ID_REQUIRED =
 
 function configurableOf(config: RunnableConfig): Record<string, unknown> {
   return (config.configurable ?? {}) as Record<string, unknown>
-}
-
-// Prisma Bytes 列为 Uint8Array<ArrayBuffer>（TS 5.7+ 泛型化）；serde 返回
-// Uint8Array<ArrayBufferLike>——归一为独立 ArrayBuffer 拷贝（字节级无差别）
-function toBytes(data: Uint8Array): Uint8Array<ArrayBuffer> {
-  return new Uint8Array(data)
 }
 
 // checkpoints 行形状（Prisma 返回结构的最小读取面；blob 宽化为 Uint8Array 后 serde 可接）
@@ -174,25 +169,27 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
     // 归一化镜像官方 MemorySaver.put（copyCheckpoint 白名单六字段）——runtime 传带额外
     // 字段的 checkpoint 时不污染 blob
     const [type, blob] = await this.serde.dumpsTyped(copyCheckpoint(checkpoint))
-    const bytes = toBytes(blob)
-    await this.prisma.checkpoint.upsert({
-      where: {
-        threadId_checkpointNs_checkpointId: {
+    await withReflectionInputFence(this.prisma, type, blob, async tx => {
+      const bytes = await redactCheckpointWrite(tx, threadId, type, blob)
+      await tx.checkpoint.upsert({
+        where: {
+          threadId_checkpointNs_checkpointId: {
+            threadId,
+            checkpointNs,
+            checkpointId: checkpoint.id,
+          },
+        },
+        create: {
           threadId,
           checkpointNs,
           checkpointId: checkpoint.id,
+          parentCheckpointId,
+          type,
+          blob: bytes,
+          metadataJson: JSON.stringify(metadata ?? {}),
         },
-      },
-      create: {
-        threadId,
-        checkpointNs,
-        checkpointId: checkpoint.id,
-        parentCheckpointId,
-        type,
-        blob: bytes,
-        metadataJson: JSON.stringify(metadata ?? {}),
-      },
-      update: { parentCheckpointId, type, blob: bytes, metadataJson: JSON.stringify(metadata ?? {}) },
+        update: { parentCheckpointId, type, blob: bytes, metadataJson: JSON.stringify(metadata ?? {}) },
+      })
     })
     // retention 护栏（#747 B 节）：单 thread checkpoint 总量超配额 → 清最老非活跃分支。
     // 写路径自动触发——护栏必须在每次落账时生效（非定时任务的惰性兜底下才可恢复）。
@@ -219,33 +216,35 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
     for (const [index, [channel, value]] of writes.entries()) {
       const idx = WRITES_IDX_MAP[channel] ?? index
       const [type, blob] = await this.serde.dumpsTyped(value)
-      const bytes = toBytes(blob)
-      const where = {
-        threadId_checkpointNs_checkpointId_taskId_idx: {
-          threadId,
-          checkpointNs,
-          checkpointId,
-          taskId,
-          idx,
-        },
-      }
-      // 幂等语义（对齐 MemorySaver）：正 idx 已存在不覆盖；负 idx（特殊 channel）重复写覆盖。
-      // findUnique→create 非原子：SQLite 单写者（better-sqlite3 同步驱动 + 事件循环串行化）
-      // 下同 (taskId, idx) 并发不成立；跨进程并发撞 P2002 的风险接受（对齐单写者 runtime
-      // 假设——官方 PG saver 以 ON CONFLICT DO NOTHING 规避，SQLite adapter 无此原语）
-      if (idx >= 0) {
-        const existing = await this.prisma.checkpointWrite.findUnique({ where })
-        if (existing) continue
-        await this.prisma.checkpointWrite.create({
-          data: { threadId, checkpointNs, checkpointId, taskId, idx, channel, type, blob: bytes },
-        })
-      } else {
-        await this.prisma.checkpointWrite.upsert({
-          where,
-          create: { threadId, checkpointNs, checkpointId, taskId, idx, channel, type, blob: bytes },
-          update: { channel, type, blob: bytes },
-        })
-      }
+      await withReflectionInputFence(this.prisma, type, blob, async tx => {
+        const bytes = await redactCheckpointWrite(tx, threadId, type, blob)
+        const where = {
+          threadId_checkpointNs_checkpointId_taskId_idx: {
+            threadId,
+            checkpointNs,
+            checkpointId,
+            taskId,
+            idx,
+          },
+        }
+        // 幂等语义（对齐 MemorySaver）：正 idx 已存在不覆盖；负 idx（特殊 channel）重复写覆盖。
+        // findUnique→create 非原子：SQLite 单写者（better-sqlite3 同步驱动 + 事件循环串行化）
+        // 下同 (taskId, idx) 并发不成立；跨进程并发撞 P2002 的风险接受（对齐单写者 runtime
+        // 假设——官方 PG saver 以 ON CONFLICT DO NOTHING 规避，SQLite adapter 无此原语）
+        if (idx >= 0) {
+          const existing = await tx.checkpointWrite.findUnique({ where })
+          if (existing) return
+          await tx.checkpointWrite.create({
+            data: { threadId, checkpointNs, checkpointId, taskId, idx, channel, type, blob: bytes },
+          })
+        } else {
+          await tx.checkpointWrite.upsert({
+            where,
+            create: { threadId, checkpointNs, checkpointId, taskId, idx, channel, type, blob: bytes },
+            update: { channel, type, blob: bytes },
+          })
+        }
+      })
     }
   }
 

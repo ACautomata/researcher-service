@@ -1,6 +1,7 @@
 // Runner 只适配工具与可信运行上下文；业务校验/证据核验/存储均在 reflections 域。
 // 工具/checkpoint 只存引用（displayId/version/hash）；正文由模型输入解引用适配临时展开。
 
+import { currentToolCallContext } from './filejournal/context'
 import { tool } from '@langchain/core/tools'
 import { ReflectionRecordsSchema } from '../reflections/params'
 import type { ReflectionResult } from '../reflections/model'
@@ -35,7 +36,7 @@ export function createReflectionTool(reflections: Pick<ReflectionService, 'execu
       }
       return JSON.stringify(denied)
     }
-    const result = await reflections.execute(frame.context, request, frame.signal)
+    const result = await reflections.execute({ ...frame.context, toolCallId: currentToolCallContext()?.toolCallId }, request, frame.signal)
     const presentation = result.presentation as { displayId?: unknown; draftId?: unknown; version?: unknown; bodyHash?: unknown; status?: unknown; confirmable?: unknown } | undefined
     if (
       result.outcome !== 'failure' &&

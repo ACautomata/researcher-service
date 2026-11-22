@@ -5,6 +5,7 @@
 
 import { ReflectionDraftLimitError } from './lifecycle'
 import { isLifecycleAction } from './lifecycle'
+import { linkReflectionToolInput, purgeReflectionToolInputs } from './checkpointCopies'
 import { purgeDraftCopies, hardDeleteRecord } from './retention'
 import type { PrismaClient } from '../generated/prisma/client'
 import { parseSavedProduct } from '../sessions/productMessage'
@@ -226,6 +227,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
   // ---- 草稿 ----
 
   async createDraft(p: {
+    toolInput?: { threadId: string; toolCallId: string }
     ownerId: string
     sessionId: string
     body: DraftBody
@@ -241,6 +243,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         if (episode) {
           const previous = await tx.reflectionDraft.findFirst({ where: { id: episode.draftId ?? '', ownerId: p.ownerId } })
           if (!previous) throw new Error('episode reference unavailable')
+          await linkReflectionToolInput(tx, p.ownerId, previous.id, p.toolInput, previous.version)
           return { ...previous, alreadyAnalyzed: true }
         }
       }
@@ -266,6 +269,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           contentJson: JSON.stringify(p.body),
         },
       })
+      await linkReflectionToolInput(tx, p.ownerId, draft.id, p.toolInput, draft.version)
       await tx.reflectionEvent.create({ data: { ownerId: p.ownerId, objectId: draft.id, action: 'draft_created', result: 'ok', createdAt: now } })
       await insertEvidenceRows(tx, p.ownerId, draft.id, draft.version, p.evidence)
       if (p.episode) await tx.reflectionEpisode.create({ data: {
@@ -291,6 +295,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
   }
 
   async reviseDraft(p: {
+    toolInput?: { threadId: string; toolCallId: string }
     ownerId: string
     draftId: string
     baseVersion: number
@@ -314,6 +319,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
           contentJson: JSON.stringify(p.body),
         },
       })
+      await linkReflectionToolInput(tx, p.ownerId, current.id, p.toolInput, version)
       await insertEvidenceRows(tx, p.ownerId, current.id, version, p.evidence)
       // 实质修改：撤销旧展示与未消费授权（父规格 I3）。
       await tx.reflectionGrant.updateMany({
@@ -334,6 +340,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
     const closed = await this.prisma.$transaction(async (tx) => {
       const current = await tx.reflectionDraft.findFirst({ where: { id: draftId, ownerId } })
       if (!current || current.status === 'cancelled' || current.status === 'committed') return null
+      await purgeReflectionToolInputs(tx, ownerId, [current.id])
       await tx.reflectionEvidence.deleteMany({ where: { draftId: current.id } })
       await tx.reflectionGrant.updateMany({
         where: { ownerId, draftId: current.id, status: 'active' },
@@ -1187,6 +1194,7 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
       select: { id: true, version: true },
     })
     const draftIds = drafts.map((d) => d.id)
+    await purgeReflectionToolInputs(tx, p.ownerId, draftIds)
     await tx.reflectionGrant.updateMany({
       where: {
         ownerId: p.ownerId,

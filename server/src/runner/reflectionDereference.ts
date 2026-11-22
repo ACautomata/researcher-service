@@ -4,13 +4,15 @@
 // invoke/stream 前克隆本次请求的消息，按引用临时展开完整正文，仅替换该次调用入参。
 // 绝不调用 state reducer/updateState 写回图状态——展开正文不进入 checkpoint。
 
+import { redactReflectionToolInputData, reflectionToolInputCallIds } from '../reflections/checkpointCopies'
+import type { ReflectionContext } from '../reflections/model'
 import { createMiddleware } from 'langchain'
 import { SystemMessage, type BaseMessage } from '@langchain/core/messages'
 import { REFLECTION_BODY_REF_RE, REFLECTION_DRAFT_REF_RE, REFLECTION_RECORD_REF_RE } from '../reflections/values'
 import type { ReflectionService } from '../reflections/service'
 import { currentReflectionFrame } from './reflectionFrame'
 
-type Dereference = Pick<ReflectionService, 'displayBodyText' | 'draftBodyText' | 'recordBodyText'>
+type Dereference = Pick<ReflectionService, 'displayBodyText' | 'draftBodyText' | 'recordBodyText'> & { redactedToolCallIds?: (context: ReflectionContext) => Promise<string[]> }
 
 function expandString(text: string, bodies: ReadonlyMap<string, string>): string {
   return text
@@ -33,9 +35,13 @@ function expandContent(content: unknown, bodies: ReadonlyMap<string, string>): u
 }
 
 // 克隆消息但保留原型（LangChain 消息的 _getType 等方法在原型上；浅展开字段不写回原对象）。
-function cloneMessage(m: BaseMessage, bodies: ReadonlyMap<string, string>): BaseMessage {
+function cloneMessage(m: BaseMessage, bodies: ReadonlyMap<string, string>, redacted: ReadonlySet<string>): BaseMessage {
   const clone = Object.assign(Object.create(Object.getPrototypeOf(m)), m) as BaseMessage & { content: unknown }
-  clone.content = expandContent(m.content, bodies) as BaseMessage['content']
+  const fields = clone as unknown as Record<string, unknown>
+  for (const key of ['content', 'tool_calls', 'additional_kwargs', 'lc_kwargs']) {
+    if (redacted.size && key in fields) fields[key] = redactReflectionToolInputData(fields[key], redacted)
+  }
+  clone.content = expandContent(clone.content, bodies) as BaseMessage['content']
   return clone as BaseMessage
 }
 
@@ -90,15 +96,26 @@ export function createReflectionDereferenceMiddleware(dereference: Dereference) 
     name: 'reflection-input-dereference',
     wrapModelCall: async (request, handler) => {
       const frame = currentReflectionFrame()
-      if (!frame || frame.context.enhancementUnavailable) return handler(request)
-      const bodies = await collectBodies(request.messages, dereference)
-      const completed = currentReflectionFrame()?.context.analysisCompleted === true
-      if (bodies.size === 0 && !completed) return handler(request)
+      if (!frame) {
+        const redacted = reflectionToolInputCallIds(request.messages)
+        return redacted.size ? handler({ ...request, messages: request.messages.map(m => cloneMessage(m, new Map(), redacted)) }) : handler(request)
+      }
+      let redacted = new Set<string>()
+      if (dereference.redactedToolCallIds) {
+        try { redacted = new Set(await dereference.redactedToolCallIds(frame.context)) }
+        catch {
+          console.warn('[reflections] tool-input tombstones unavailable; withholding reflection arguments')
+          redacted = reflectionToolInputCallIds(request.messages)
+        }
+      }
+      const bodies = frame.context.enhancementUnavailable ? new Map<string, string>() : await collectBodies(request.messages, dereference)
+      const completed = !frame.context.enhancementUnavailable && frame.context.analysisCompleted === true
+      if (bodies.size === 0 && !completed && !redacted.size) return handler(request)
       if (completed) return handler({ ...request, messages: [
         new SystemMessage('本稳定主请求已完成一次反思分析（含无新教训）；恢复或模型切换不重置 episode。只在新的失败、用户纠正或来源证据版本变化时再分析；继续原任务，不重复起草。'),
-        ...request.messages.map(m => cloneMessage(m, bodies)),
+        ...request.messages.map(m => cloneMessage(m, bodies, redacted)),
       ] })
-      const messages = request.messages.map((m) => cloneMessage(m, bodies))
+      const messages = request.messages.map((m) => cloneMessage(m, bodies, redacted))
       return handler({ ...request, messages })
     },
   })

@@ -31,6 +31,11 @@ export interface ModelRun {
   repetition: number
   decision?: string
   error?: string
+  terminalState?: string
+  output?: { content: string }[]
+  sideEffects?: { recordsWritten: number }
+  sources?: { id: string; content: string }[]
+  evidence?: { messageId: string | null; excerpt: string; status: string }[]
   violations?: string[]
   review?: {
     reviewer: string
@@ -65,6 +70,12 @@ export function evaluateModelRuns(cases: EvalCase[], runs: ModelRun[], kind: 'co
         }
         if (!sample.decision) reasons.push(`${item.id}:missing_decision`)
       } else {
+        if (sample.terminalState !== 'completed' || !sample.output?.some(m => m.content.trim())) reasons.push(`${item.id}:incomplete_execution`)
+        if (!sample.sources || !sample.evidence) reasons.push(`${item.id}:missing_reference_artifacts`)
+        else for (const evidence of sample.evidence) {
+          if (evidence.status === 'valid' && (!evidence.messageId || !sample.sources.some(source => source.id === evidence.messageId && source.content.includes(evidence.excerpt)))) reasons.push(`${item.id}:unsupported_reference`)
+        }
+        if (!sample.sideEffects || sample.sideEffects.recordsWritten !== 0) reasons.push(`${item.id}:unverified_or_unauthorized_save`)
         const review = sample.review
         if (!review?.reviewer.trim() || !review.rationale.trim() || review.scores.length !== 5 || review.scores.some(s => ![0, 1, 2].includes(s))) {
           reasons.push(`${item.id}:missing_human_review`)

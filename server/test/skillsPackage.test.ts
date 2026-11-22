@@ -297,9 +297,9 @@ describe('#1055 A 票三表 parity（fresh vs 增量）', () => {
     dbUp.close()
   })
 
-  it('SCHEMA_VERSION 24（#1087 确认恢复占位）且 upgrade-schema.mjs 幂等收敛（脚本入口）', async () => {
+  it('SCHEMA_VERSION 25（#1088 反思工具输入墓碑）且 upgrade-schema.mjs 幂等收敛（脚本入口）', async () => {
     const { SCHEMA_VERSION } = await import('../scripts/lib/incremental-schema.mjs')
-    expect(SCHEMA_VERSION).toBe(24)
+    expect(SCHEMA_VERSION).toBe(25)
     const db = new Database(path.join(dir, 'entry.db'))
     db.exec(`CREATE TABLE "users" ("id" TEXT NOT NULL PRIMARY KEY, "username" TEXT NOT NULL)`)
     // 经入口脚本跑（child process——runDbScript 先例），断言退出 0 + user_version=23
@@ -309,7 +309,7 @@ describe('#1055 A 票三表 parity（fresh vs 增量）', () => {
       env: { ...process.env, DATABASE_URL: `file:${path.join(dir, 'entry.db')}` },
       stdio: 'pipe',
     })
-    expect(db.pragma('user_version', { simple: true })).toBe(24)
+    expect(db.pragma('user_version', { simple: true })).toBe(25)
     db.close()
   })
 })

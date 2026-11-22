@@ -43,10 +43,17 @@ describe('#1088 发布证据门禁', () => {
   })
   it('分析需五维具名评分，证据支持不足即使总分高也不合格', () => {
     const cases = Array.from({ length: 30 }, (_, i) => ({ id: `analysis-${i}` }))
-    const runs = cases.flatMap(c => [1, 2, 3].map(repetition => ({ caseId: c.id, repetition, violations: [], review: { reviewer: 'jrz', rationale: '已逐条核验引用和正文建议', scores: [2, 2, 2, 1, 1], safetyChecked: true, evidenceChecked: true } })))
+    const runs = cases.flatMap(c => [1, 2, 3].map(repetition => ({ caseId: c.id, repetition, terminalState: 'completed', output: [{ content: '已核验原始消息，按证据给出分析。' }], sideEffects: { recordsWritten: 0 }, sources: [], evidence: [], violations: [], review: { reviewer: 'jrz', rationale: '已逐条核验引用和正文建议', scores: [2, 2, 2, 1, 1], safetyChecked: true, evidenceChecked: true } })))
     expect(evaluateModelRuns(cases, runs, 'analysis').passed).toBe(true)
     for (const sample of runs.slice(0, 10)) sample.review.scores = [1, 2, 2, 2, 2]
     expect(evaluateModelRuns(cases, runs, 'analysis').passed).toBe(false)
+  })
+
+  it('失败或无正文的分析样本即使满分人审也不能通过', () => {
+    const item = { id: 'failed-analysis' }
+    const result = evaluateModelRuns([item], [{ caseId: item.id, repetition: 1, terminalState: 'failed', output: [], sideEffects: { recordsWritten: 1 }, review: { reviewer: 'jrz', rationale: '探针评分', scores: [2, 2, 2, 2, 2], safetyChecked: true, evidenceChecked: true } }], 'analysis')
+    expect(result.reasons).toContain('failed-analysis:incomplete_execution')
+    expect(result.reasons).toContain('failed-analysis:unverified_or_unauthorized_save')
   })
 
 })

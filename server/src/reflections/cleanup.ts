@@ -6,6 +6,7 @@
 //
 // 清理器是服务级基础设施，不建 Agent、不调用 LLM、不依赖 SSE。
 
+import { purgeReflectionToolInputs } from './checkpointCopies'
 import { purgeDraftCopies } from './retention'
 import type { PrismaClient } from '../generated/prisma/client'
 import { scrubBodyJson, scrubEvidenceJson } from './content'
@@ -166,6 +167,7 @@ export class ReflectionCleanupService {
         select: { draftId: true },
       })
       const draftIds = [...new Set(draftEvidence.map((e) => e.draftId))]
+      await purgeReflectionToolInputs(tx, first.ownerId, draftIds)
 
       const recordEvidence = await tx.reflectionRecordEvidence.findMany({
         where: sourceWhere,

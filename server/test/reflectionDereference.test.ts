@@ -136,4 +136,19 @@ describe('#1080 模型输入解引用（RF21）', () => {
     expect(String(received[0])).toContain('记录正文')
     expect(received[1]).toBe('记录 reflection_record:rec-009:1')
   })
+  it('RF14 已删除反思工具输入只在本次模型入参脱敏，不改原图消息', async () => {
+    const { AIMessage } = await import('@langchain/core/messages')
+    const original = new AIMessage({ content: '', tool_calls: [{ id: 'call-deleted', name: 'reflection_records', args: { operation: 'draft', problem: '已删除的专属正文' } }] })
+    const guarded = createReflectionDereferenceMiddleware({
+      displayBodyText: async () => null, draftBodyText: async () => null, recordBodyText: async () => null,
+      redactedToolCallIds: async () => ['call-deleted'],
+    })
+    let actual: unknown
+    await runWithReflectionContext({ ...frame, context: { ...frame.context, enhancementUnavailable: true } }, async () => {
+      await (guarded as unknown as { wrapModelCall: (req: unknown, handler: (req: unknown) => unknown) => Promise<unknown> }).wrapModelCall(requestWith([original]), req => { actual = req; return { ok: true } })
+    })
+    expect(JSON.stringify(actual)).not.toContain('已删除的专属正文')
+    expect(original.tool_calls?.[0].args.problem).toBe('已删除的专属正文')
+  })
+
 })

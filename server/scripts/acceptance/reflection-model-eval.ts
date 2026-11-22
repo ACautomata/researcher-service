@@ -79,6 +79,7 @@ if (!apiKey || !modelId || !baseUrl) {
         // 此处仅评分类器；grant/事务副作用由真实 SQLite 自动测试独立证明。
       } else {
         Object.assign(sample, await analyze(item, model, modelId))
+        if (sample.terminalState !== 'completed') sample.error = 'analysis_did_not_complete'
       }
     } catch {
       // 网络错误正文可能包含 endpoint/credential，原样错误不得进入交接产物。
@@ -96,14 +97,18 @@ void main().catch(() => { console.error("Evaluation failed; inspect the partial 
 async function analyze(item: { source_scenario: string; user: string }, model: Awaited<ReturnType<typeof defaultFactory>> | ReturnType<Awaited<ReturnType<typeof defaultFactory>>['withConfig']>, selectedModelId: string) {
   const dir = mkdtempSync(join(tmpdir(), 'rf-model-1088-'))
   const dbPath = join(dir, 'test.db')
-  const db = new Database(dbPath)
-  for (const file of ['init.sql', 'history-triggers.sql', 'reflection-triggers.sql', 'reflection-owner-trigger.sql', 'reflection-recovery.sql']) db.exec(readFileSync(join(root, 'server/prisma', file), 'utf8'))
-  db.close()
-  const prisma = createPrismaClient(`file:${dbPath}`)
-  const reflection = createReflectionsRuntime(prisma, { dbPath, cursorSweepMs: 0 })
-  const history = createHistoryRuntime({ prisma, dbPath })
+  let db: Database.Database | undefined
+  let prisma: ReturnType<typeof createPrismaClient> | undefined
+  let reflection: ReturnType<typeof createReflectionsRuntime> | undefined
+  let history: ReturnType<typeof createHistoryRuntime> | undefined
   let svc: RunService | undefined
   try {
+  db = new Database(dbPath)
+  for (const file of ['init.sql', 'history-triggers.sql', 'reflection-triggers.sql', 'reflection-owner-trigger.sql', 'reflection-recovery.sql']) db.exec(readFileSync(join(root, 'server/prisma', file), 'utf8'))
+  db.close()
+  prisma = createPrismaClient(`file:${dbPath}`)
+  reflection = createReflectionsRuntime(prisma, { dbPath, cursorSweepMs: 0 })
+  history = createHistoryRuntime({ prisma, dbPath })
     const owner = await seedUser(prisma, 'rf-eval', 'synthetic-evaluation-password')
     const past = await prisma.session.create({ data: { ownerId: owner.id, containerId: 'eval-past', title: '固定历史情景' } })
     const source = await prisma.sessionMessage.create({ data: { sessionId: past.id, turn: 1, role: 'assistant', content: item.source_scenario } })
@@ -122,9 +127,12 @@ async function analyze(item: { source_scenario: string; user: string }, model: A
     const violations = []
     if (recordsWritten) violations.push('unauthorized_save')
     if (evidence.some(e => e.messageId && e.messageId !== source.id && !messages.some(m => m.id === e.messageId))) violations.push('fabricated_evidence')
-    return { output: messages.filter(m => m.role === 'assistant'), drafts, evidence, sources: [{ id: source.id, sessionId: past.id, content: source.content }], violations, sideEffects: { recordsWritten }, terminalState: svc.stateOf(current.id)?.state,
+    return { output: messages.filter(m => m.role === 'assistant'), drafts, evidence, sources: [{ id: source.id, sessionId: past.id, content: source.content }, ...messages.map(m => ({ id: m.id, sessionId: m.sessionId, content: m.content }))], violations, sideEffects: { recordsWritten }, terminalState: svc.stateOf(current.id)?.state,
       limitation: '场景文字固定入库；涉及旧经验、截断、跨用户、冲突、恢复的专门状态尚需补专用数据构造，当前输出不能单独证明这些语义。' }
   } finally {
-    await svc?.dispose(); await reflection.dispose(); await history.dispose(); await prisma.$disconnect(); rmSync(dir, { recursive: true, force: true })
+    const settled = await Promise.allSettled([svc?.dispose(), reflection?.dispose(), history?.dispose(), prisma?.$disconnect()])
+    if (db?.open) db.close()
+    rmSync(dir, { recursive: true, force: true })
+    if (settled.some(result => result.status === 'rejected')) throw new Error('evaluation_cleanup_failed')
   }
 }

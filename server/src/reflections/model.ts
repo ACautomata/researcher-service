@@ -13,6 +13,7 @@ import {
 } from './values'
 
 export interface ReflectionContext {
+  readonly toolCallId?: string // 可信工具调用身份，模型参数不得声明
   readonly analysisCompleted?: boolean
   readonly enhancementUnavailable?: boolean
   /** 仅由历史 read 实际交付的稳定来源；模型参数不能声明。 */
@@ -414,6 +415,7 @@ export interface ReflectionStore {
   analysisCompleted(context: ReflectionContext): Promise<boolean>
   completeAnalysis(context: ReflectionContext): Promise<void>
   createDraft(p: {
+    toolInput?: { threadId: string; toolCallId: string }
     ownerId: string
     sessionId: string
     body: DraftBody
@@ -425,6 +427,7 @@ export interface ReflectionStore {
   }): Promise<DraftRecord>
   getDraft(ownerId: string, draftId: string): Promise<DraftRecord | null>
   reviseDraft(p: {
+    toolInput?: { threadId: string; toolCallId: string }
     ownerId: string
     draftId: string
     baseVersion: number

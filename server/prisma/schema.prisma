@@ -69,6 +69,7 @@ model User {
   // --- reflections（#1080 RF-T04）---
   reflectionDrafts ReflectionDraft[]
   reflectionPresentations ReflectionPresentation[]
+  reflectionToolInputLinks ReflectionToolInputLink[]
 
   @@map("users")
 }
@@ -268,6 +269,7 @@ model Session {
   historyRequestBudgets HistoryRequestBudget[]
   reflectionDrafts ReflectionDraft[]
   reflectionPresentations ReflectionPresentation[]
+  reflectionToolInputLinks ReflectionToolInputLink[]
 
   @@index([ownerId])
   @@map("sessions")
@@ -1106,4 +1108,19 @@ model ReflectionSafetyJournal {
   objectId String
   state String
   @@map("reflection_safety_journal")
+}
+
+// #1088：只有调用身份，无正文；阻止在飞图把已删除工具输入再次写回。
+model ReflectionToolInputLink {
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  threadId String
+  session Session @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  toolCallId String
+  draftId String?
+  draftVersion Int?
+  redacted Boolean @default(false)
+  @@id([threadId, toolCallId])
+  @@index([ownerId])
+  @@map("reflection_tool_input_links")
 }

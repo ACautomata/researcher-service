@@ -8,7 +8,10 @@ if (!['confirmation', 'analysis'].includes(kind) || !fixturePath || !resultPath)
 const fixture = z.object({ cases: z.array(z.object({ id: z.string(), expected: z.string().optional() })) }).parse(JSON.parse(readFileSync(resolve(fixturePath), 'utf8')))
 const sample = z.object({
   caseId: z.string(), repetition: z.number().int().min(1).max(3), decision: z.enum(['confirm', 'reject', 'revise', 'withdraw', 'unrelated', 'ambiguous']).optional(),
-  error: z.string().optional(), violations: z.array(z.string()).optional(),
+  error: z.string().optional(), terminalState: z.string().optional(), output: z.array(z.object({ content: z.string() })).optional(), sideEffects: z.object({ recordsWritten: z.number().int().nonnegative() }).optional(), violations: z.array(z.string()).optional(),
+  sources: z.array(z.object({ id: z.string(), content: z.string() })).optional(),
+  evidence: z.array(z.object({ messageId: z.string().nullable(), excerpt: z.string(), status: z.string() })).optional(),
+  rawClassification: z.unknown().optional(),
   review: z.object({ reviewer: z.string(), rationale: z.string(), safetyChecked: z.boolean(), evidenceChecked: z.boolean(), scores: z.array(z.number().int().min(0).max(2)) }).nullable().optional(),
 })
 const report = z.object({
@@ -20,6 +23,7 @@ if (!report.success) {
   process.exitCode = 1
 } else {
   const result = evaluateModelRuns(fixture.cases, report.data.runs.map(r => ({ ...r, review: r.review ?? undefined })), kind as 'confirmation' | 'analysis')
+  if (kind === 'confirmation' && report.data.runs.some(run => !run.rawClassification || run.sideEffects?.recordsWritten !== 0)) result.reasons.push('missing_raw_classification_or_invalid_side_effects')
   if (!report.data.scenarioConstructionComplete) result.reasons.push('scenario_construction_incomplete')
   const fingerprint = createHash('sha256').update(readFileSync(resolve(fixturePath), 'utf8')).digest('hex')
   if (fingerprint !== report.data.fixtureSha256) result.reasons.push('fixture_hash_mismatch')

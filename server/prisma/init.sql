@@ -836,3 +836,18 @@ CREATE TABLE IF NOT EXISTS reflection_safety_journal (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, ownerId TEXT NOT NULL, kind TEXT NOT NULL,
  objectId TEXT NOT NULL, state TEXT NOT NULL
 );
+
+-- #1088：无内容工具输入墓碑，阻止已删除参数晚写复活。
+CREATE TABLE "reflection_tool_input_links" (
+    "ownerId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "toolCallId" TEXT NOT NULL,
+    "draftId" TEXT,
+    "draftVersion" INTEGER,
+    "redacted" BOOLEAN NOT NULL DEFAULT false,
+
+    PRIMARY KEY ("threadId", "toolCallId"),
+    CONSTRAINT "reflection_tool_input_links_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "reflection_tool_input_links_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX "reflection_tool_input_links_ownerId_idx" ON "reflection_tool_input_links"("ownerId");

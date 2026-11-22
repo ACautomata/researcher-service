@@ -5,6 +5,7 @@
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
@@ -183,16 +184,30 @@ describe('#1086 Leader 主动反思：真实 RunService / 图 / SQLite', () => {
       expect((await runtime.service.confirmTurn({ ...context(), triggerMessageId: confirm }, async () => ({ decision: 'confirm' }))).status).toBe('granted')
       const committed = await runtime.service.execute({ ...context(), triggerMessageId: confirm }, { operation: 'commit', draft_id: draftId, version: 1 })
       expect(committed.outcome, JSON.stringify(committed)).toBe('success')
+      const originalCheckpoint = await new PrismaCheckpointSaver(prisma).getTuple({ configurable: { thread_id: originalSessionId } })
+      expect(originalCheckpoint).toBeDefined()
       const recordId = (committed.record as { record_id: string }).record_id
       sessionId = (await prisma.session.create({ data: { ownerId: owner.id, containerId: LAB, title: '跨会话复用' } })).id
       const readTrigger = await seedUserMessage('使用之前的验证遗漏经验继续当前代码任务')
+      const reuseModels: ScriptedChatModel[] = []
       const reuse = makeService([
         toolCallAi('search-e2e', 'reflection_records', { operation: 'search', query: '完整验收教训' }),
         toolCallAi('read-e2e', 'reflection_records', { operation: 'read', targets: [{ record_id: recordId }] }),
         new AIMessage('依据经验先做聚焦验证，再继续任务。'),
-      ], [])
+      ], reuseModels)
       services.push(reuse)
       await reuse.execute(cmd(readTrigger, '使用之前的验证遗漏经验继续当前代码任务'))
+      const reused = reuseModels.find(m => m.invokeCount > 0)!
+      const searched = JSON.stringify(reused.receivedMessages[1])
+      expect(searched).toContain(recordId)
+      expect(searched).toContain('完整验收教训')
+      const readBack = JSON.stringify(reused.receivedMessages[2])
+      expect(readBack).toContain('【反思记录 v1】')
+      expect(readBack).toContain(recordId)
+      expect(readBack).toContain(longProblem)
+      const reuseCheckpoint = await new PrismaCheckpointSaver(prisma).getTuple({ configurable: { thread_id: sessionId } })
+      expect(reuseCheckpoint).toBeDefined()
+      expect(JSON.stringify(reuseCheckpoint)).not.toContain('【反思记录 v1】')
       async function authorizeAndCommit(request: Record<string, unknown>) {
         requestId = await seedUserMessage('管理这条经验')
         await history.resolveRunRequest({ kind: 'message', runId: 'e2e-management', ownerId: owner.id, sessionId, triggerMessageId: requestId })
@@ -223,6 +238,7 @@ describe('#1086 Leader 主动反思：真实 RunService / 图 / SQLite', () => {
       const merged = await authorizeAndCommit({ ...body, action: 'merge', targets: [{ record_id: recordId, version: 2 }, { record_id: another.record_id, version: 1 }] })
       await prisma.sessionMessage.update({ where: { id: source.id }, data: { content: '来源已经更正' } })
       requestId = await seedUserMessage('查询仍有效的经验')
+      expect(await runtime.port.redactedToolCallIds!({ ...context(), currentSessionId: originalSessionId })).toContain('draft-e2e')
       const active = await runtime.service.execute(context(), { operation: 'search' })
       expect(active.count).toBe(0)
       expect(await runtime.service.recordBodyText(context(), merged.record_id, 1)).toBeNull()
@@ -231,8 +247,18 @@ describe('#1086 Leader 主动反思：真实 RunService / 图 / SQLite', () => {
       await authorizeAndCommit({ operation: 'draft', action: 'delete', targets: [{ record_id: recordId, version: 2 }] })
       await authorizeAndCommit({ operation: 'draft', action: 'delete', targets: [{ record_id: another.record_id, version: 1 }] })
       expect(await runtime.service.getDisplay(owner.id, displayId)).toMatchObject({ body: null })
-      const checkpoints = JSON.stringify(await prisma.checkpoint.findMany({ where: { threadId: originalSessionId } }))
-      expect(checkpoints).not.toContain(longProblem)
+      const saver = new PrismaCheckpointSaver(prisma)
+      const lateId = randomUUID()
+      await saver.put({ configurable: { thread_id: originalSessionId } }, { ...originalCheckpoint!.checkpoint, id: lateId }, { source: 'update', step: 99, parents: {} })
+      await saver.putWrites({ configurable: { thread_id: originalSessionId, checkpoint_id: lateId } }, [['messages', originalCheckpoint!.checkpoint.channel_values.messages]], 'late-writer')
+      const lateMessageId = await sessions.recordTurn({ sessionId: originalSessionId, runId: 'late-product', anchorCheckpointId: lateId, status: 'success', aggregate: { content: '迟到的工具状态', tools: [{ toolCallId: 'draft-e2e', name: 'reflection_records', input: longProblem, state: 'success' }] } })
+      const lateMessage = await prisma.sessionMessage.findUniqueOrThrow({ where: { id: lateMessageId } })
+      expect(lateMessage.attachmentsJson).toContain('反思工具输入已删除')
+      expect(lateMessage.attachmentsJson).not.toContain(longProblem.slice(0, 100))
+      const checkpoints = []
+      for await (const tuple of new PrismaCheckpointSaver(prisma).list({ configurable: { thread_id: originalSessionId } })) checkpoints.push(tuple)
+      expect(checkpoints.length).toBeGreaterThan(0)
+      expect(JSON.stringify(checkpoints).includes(longProblem), '硬删后快照和迟到待写不得包含原正文').toBe(false)
     } finally {
       await prisma.reflectionGrant.deleteMany({})
       for (const service of services) await service.dispose()

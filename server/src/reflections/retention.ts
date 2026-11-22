@@ -1,9 +1,11 @@
 // 反思专属副本清理（#1085）：短写事务，与授权/目标 CAS 同一提交边界。
+import { purgeReflectionToolInputs } from './checkpointCopies'
 import type { PrismaClient } from '../generated/prisma/client'
 type Tx = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0]
 
 export async function purgeDraftCopies(tx: Tx, ownerId: string, ids: string[], now: Date, status = 'cancelled'): Promise<void> {
   if (!ids.length) return
+  await purgeReflectionToolInputs(tx, ownerId, ids)
   await tx.reflectionEvidence.deleteMany({ where: { ownerId, draftId: { in: ids } } })
   await tx.reflectionPresentation.updateMany({ where: { ownerId, draftId: { in: ids } }, data: { status: 'deleted', bodyJson: '{}', revokedAt: now } })
   await tx.reflectionGrant.updateMany({ where: { ownerId, draftId: { in: ids }, status: 'active' }, data: { status: 'revoked' } })
