@@ -60,7 +60,7 @@ describe('ReflectionBlock', () => {
     vi.restoreAllMocks()
   })
 
-  it('渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack', async () => {
+  it('RF04 渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack', async () => {
     getReflectionDisplay.mockResolvedValue(displayWith())
     const w = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
     await flushPromises()

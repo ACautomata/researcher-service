@@ -153,7 +153,7 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
     expect(commit.error?.code).toBe('confirmation_required')
   })
 
-  it('recordTurn 接缝：在飞证据落行后转 valid、草稿转 pending；ack 前不可用', async () => {
+  it('RF03 recordTurn 接缝：在飞证据落行后转 valid、草稿转 pending；ack 前不可用', async () => {
     const excerpt = '当前轮续跑输出：已完成修改'
     const created = await runtime.service.execute(leader('run-bind'), {
       ...DRAFT,

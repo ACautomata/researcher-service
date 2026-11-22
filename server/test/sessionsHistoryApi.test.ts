@@ -368,7 +368,7 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
 
   // ---- fork（story 18/20 + #768 D7）----
 
-  it('fork 全件：溯源行 + checkpoint/消息/journal/attachments 截断复制 + created{source:fork} 帧 + 沙箱字面复制调用', async () => {
+  it('O5 fork 全件：溯源行 + checkpoint/消息/journal/attachments 截断复制 + created{source:fork} 帧 + 沙箱字面复制调用', async () => {
     const sid = await seedConversation('fork 源会话', ['问 1', '问 2'])
     const before = await projection(sid)
     const firstUser = before[0]!

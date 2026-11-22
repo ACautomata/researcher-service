@@ -17,6 +17,8 @@ import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
 import { createReflectionsRuntime, type ReflectionsRuntime } from '../src/reflections/runtime'
 import { createHistoryRuntime, type HistoryRuntime } from '../src/sessions/history/runtime'
+import { SessionService } from '../src/sessions/service'
+import { serializeAttachments } from '../src/sessions/reducer'
 import { sha256 } from '../src/reflections/content'
 import { seedUser } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
@@ -126,7 +128,7 @@ describe('#1086 Leader 主动反思：真实 RunService / 图 / SQLite', () => {
   }
 
   async function seedUserMessage(content: string): Promise<string> {
-    turn += 1
+    turn = Math.max(turn, (await prisma.sessionMessage.findFirst({ where: { sessionId }, orderBy: { turn: 'desc' } }))?.turn ?? 0) + 1
     const row = await prisma.sessionMessage.create({ data: { sessionId, turn, role: 'user', content } })
     return row.id
   }
@@ -135,6 +137,112 @@ describe('#1086 Leader 主动反思：真实 RunService / 图 / SQLite', () => {
     return { runId: `run-${Math.random().toString(36).slice(2, 10)}`, sessionId, ownerId: owner.id, username: owner.username, kind: 'message', content, triggerMessageId }
   }
 
+
+  it('RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放', async () => {
+    const originalSessionId = sessionId
+    const services: RunService[] = []
+    let requestId: string | undefined
+    const historyEvidence = new Set<string>()
+    const context = () => ({ ownerId: owner.id, currentSessionId: sessionId, role: 'leader' as const, requestId, historyEvidence })
+    const sourceSession = await prisma.session.create({ data: { ownerId: owner.id, containerId: LAB, title: '历史失败原始记录' } })
+    const source = await prisma.sessionMessage.create({ data: { sessionId: sourceSession.id, turn: 1, role: 'assistant', content: BODY_TEXT } })
+    const longProblem = '验证遗漏造成回归。'.repeat(600)
+    let draftId = ''
+    let displayId = ''
+    const models: ScriptedChatModel[] = []
+    const trigger = await seedUserMessage('依据历史失败复盘，展示全文，随后继续原任务')
+    requestId = trigger
+    const svc = makeService([
+      toolCallAi('history-e2e', 'session_history', { operation: 'read', targets: [{ session_id: sourceSession.id }] }),
+      toolCallAi('draft-e2e', 'reflection_records', {
+        operation: 'draft', action: 'create', category: 'verification', title: '完整验收教训', problem: longProblem,
+        causes: [{ text: '未运行测试', kind: 'fact', evidence: [1] }], improvements: ['修改后先运行聚焦测试'],
+        scope: { labels: ['验证'], conditions: '代码修改后', exclusions: '纯问答' },
+        evidence: [{ session_id: sourceSession.id, message_id: source.id, region: 'content', excerpt: BODY_TEXT }],
+      }),
+      () => {
+        const messages = models[0].receivedMessages.at(-1) as Array<{ tool_call_id?: string; content?: string }>
+        draftId = JSON.parse(messages.find(m => m.tool_call_id === 'draft-e2e')!.content!).draft.draft_id
+        return toolCallAi('present-e2e', 'reflection_records', { operation: 'present', draft_id: draftId, version: 1 })
+      },
+      new AIMessage('完整草稿等待确认，继续原任务。'),
+    ], models)
+    const sessions = new SessionService({ prisma, hub, runService: svc, dispatch: async () => {} })
+    svc.setRecordTurn(p => sessions.recordTurn(p))
+    try {
+      await svc.execute(cmd(trigger, '依据历史失败复盘，展示全文，随后继续原任务'))
+      const presentation = await prisma.reflectionPresentation.findFirstOrThrow({ where: { draftId } })
+      displayId = presentation.displayId
+      const shown = await runtime.service.getDisplay(owner.id, displayId)
+      expect(shown?.body?.problem).toBe(longProblem)
+      expect(Buffer.byteLength(shown!.body!.problem)).toBeGreaterThan(4096)
+      expect(shown?.messageId).toBeTruthy()
+      expect('seq' in await runtime.service.ackDisplay(owner.id, displayId, { version: 1, hash: presentation.bodyHash, messageId: shown!.messageId! })).toBe(true)
+      const confirm = await seedUserMessage('好，就这版保存')
+      requestId = confirm
+      expect((await runtime.service.confirmTurn({ ...context(), triggerMessageId: confirm }, async () => ({ decision: 'confirm' }))).status).toBe('granted')
+      const committed = await runtime.service.execute({ ...context(), triggerMessageId: confirm }, { operation: 'commit', draft_id: draftId, version: 1 })
+      expect(committed.outcome, JSON.stringify(committed)).toBe('success')
+      const recordId = (committed.record as { record_id: string }).record_id
+      sessionId = (await prisma.session.create({ data: { ownerId: owner.id, containerId: LAB, title: '跨会话复用' } })).id
+      const readTrigger = await seedUserMessage('使用之前的验证遗漏经验继续当前代码任务')
+      const reuse = makeService([
+        toolCallAi('search-e2e', 'reflection_records', { operation: 'search', query: '完整验收教训' }),
+        toolCallAi('read-e2e', 'reflection_records', { operation: 'read', targets: [{ record_id: recordId }] }),
+        new AIMessage('依据经验先做聚焦验证，再继续任务。'),
+      ], [])
+      services.push(reuse)
+      await reuse.execute(cmd(readTrigger, '使用之前的验证遗漏经验继续当前代码任务'))
+      async function authorizeAndCommit(request: Record<string, unknown>) {
+        requestId = await seedUserMessage('管理这条经验')
+        await history.resolveRunRequest({ kind: 'message', runId: 'e2e-management', ownerId: owner.id, sessionId, triggerMessageId: requestId })
+        const historyRead = await history.execute(context(), { operation: 'read', targets: [{ session_id: sourceSession.id }] })
+        expect(historyRead.outcome, JSON.stringify(historyRead)).toBe('success')
+        for (const group of historyRead.groups) for (const message of group.messages ?? []) historyEvidence.add(`${message.session_id}:${message.message_id}`)
+        const result = await runtime.service.execute(context(), request)
+        expect(result.outcome, JSON.stringify(result)).toBe('success')
+        const { draft_id, version } = result.draft as { draft_id: string; version: number }
+        const d = { draft_id, version }
+        const presented = await runtime.service.execute(context(), { operation: 'present', ...d })
+        expect(presented.outcome, JSON.stringify(presented)).toBe('success')
+        const p = presented.presentation as { displayId: string; bodyHash: string }
+        const row = await prisma.sessionMessage.create({ data: { sessionId, turn: ++turn, role: 'assistant', content: '展示完整操作', attachmentsJson: serializeAttachments({ presentations: [{ displayId: p.displayId, draftId: d.draft_id, version: d.version, bodyHash: p.bodyHash, status: 'pending', confirmable: true }] }) } })
+        await runtime.store.bindInFlightEvidence({ ownerId: owner.id, sessionId, runId: 'e2e-management', messageId: row.id, displayIds: [p.displayId] })
+        expect('seq' in await runtime.service.ackDisplay(owner.id, p.displayId, { version: d.version, hash: p.bodyHash, messageId: row.id })).toBe(true)
+        const message = await seedUserMessage('确认执行上述完整操作')
+        const confirmed = { ...context(), triggerMessageId: message }
+        expect((await runtime.service.confirmTurn(confirmed, async () => ({ decision: 'confirm' }))).status).toBe('granted')
+        const saved = await runtime.service.execute(confirmed, { operation: 'commit', ...d })
+        expect(saved.outcome, JSON.stringify(saved)).toBe('success')
+        return saved.record as { record_id: string; revision: number }
+      }
+      const body = { operation: 'draft', category: 'verification', title: '修订后的教训', problem: '验证遗漏造成回归', causes: [{ text: '未运行测试', kind: 'fact', evidence: [1] }], improvements: ['修改代码后验证类型及聚焦测试'], scope: { labels: ['验证'], conditions: '代码修改后', exclusions: '纯问答' }, evidence: [{ session_id: sourceSession.id, message_id: source.id, region: 'content', excerpt: BODY_TEXT }] }
+      const revised = await authorizeAndCommit({ ...body, action: 'revise', targets: [{ record_id: recordId, version: 1 }] })
+      expect(revised).toMatchObject({ record_id: recordId, revision: 2 })
+      const another = await authorizeAndCommit({ ...body, action: 'create', title: '合并来源' })
+      const merged = await authorizeAndCommit({ ...body, action: 'merge', targets: [{ record_id: recordId, version: 2 }, { record_id: another.record_id, version: 1 }] })
+      await prisma.sessionMessage.update({ where: { id: source.id }, data: { content: '来源已经更正' } })
+      requestId = await seedUserMessage('查询仍有效的经验')
+      const active = await runtime.service.execute(context(), { operation: 'search' })
+      expect(active.count).toBe(0)
+      expect(await runtime.service.recordBodyText(context(), merged.record_id, 1)).toBeNull()
+      await authorizeAndCommit({ operation: 'draft', action: 'delete', targets: [{ record_id: merged.record_id, version: 1 }] })
+      expect(await runtime.service.recordBodyText(context(), merged.record_id, 1)).toBeNull()
+      await authorizeAndCommit({ operation: 'draft', action: 'delete', targets: [{ record_id: recordId, version: 2 }] })
+      await authorizeAndCommit({ operation: 'draft', action: 'delete', targets: [{ record_id: another.record_id, version: 1 }] })
+      expect(await runtime.service.getDisplay(owner.id, displayId)).toMatchObject({ body: null })
+      const checkpoints = JSON.stringify(await prisma.checkpoint.findMany({ where: { threadId: originalSessionId } }))
+      expect(checkpoints).not.toContain(longProblem)
+    } finally {
+      await prisma.reflectionGrant.deleteMany({})
+      for (const service of services) await service.dispose()
+      await svc.dispose()
+      await runtime.dispose()
+      await history.dispose()
+      runtime = createReflectionsRuntime(prisma, { dbPath: path.join(dir, 'test.db'), cursorSweepMs: 0 })
+      history = createHistoryRuntime({ prisma, dbPath: path.join(dir, 'test.db') })
+    }
+  }, 60_000)
 
   it('RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务', async () => {
     const past = await prisma.session.create({ data: { ownerId: owner.id, containerId: LAB, title: '遗漏验证的失败' } })
