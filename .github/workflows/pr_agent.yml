@@ -2,31 +2,41 @@ name: PR Agent
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
 
 jobs:
   pr_agent:
     if: ${{ github.event.sender.type != 'Bot' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
       contents: read
       issues: write
       pull-requests: write
     steps:
       - name: Run PR Agent with ZAI
-        # the-pr-agent/pr-agent main，固定提交以避免上游 Action 静默变更。
-        uses: the-pr-agent/pr-agent@e7fd5a233a4bf95d01a3c399e62768cb33172ec9
+        # 固定多架构运行时镜像摘要，避免滚动标签静默改变依赖与超时行为。
+        uses: docker://pragent/pr-agent@sha256:548e894a88071180832b2f4233f734d0acd0db1a879e2fcbaa70bac8b8372ebe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ZAI 的 Anthropic 兼容协议端点；密钥只从 Actions Secret 注入。
-          ANTHROPIC__KEY: ${{ secrets.ZAI_API_KEY }}
-          ANTHROPIC_API_BASE: "https://open.bigmodel.cn/api/anthropic"
-          config.model: "anthropic/glm-5.3"
+          # ZAI 官方 OpenAI 兼容端点；密钥只从 Actions Secret 注入。
+          ZAI__KEY: ${{ secrets.ZAI_API_KEY }}
+          ZAI_API_BASE: "https://open.bigmodel.cn/api/paas/v4"
+          config.model: "zai/glm-5.3"
+          # GLM-5.3 始终思考；服务端仅接受 low、high 或 max，覆盖默认的 medium。
+          config.reasoning_effort: "max"
           # 不配置其他厂商的 fallback，避免失败时产生意外调用和费用。
           config.fallback_models: '[]'
-          # 自定义模型不在内置 token 表中，按 256K 输入窗口处理 PR 上下文。
-          config.custom_model_max_tokens: "262144"
+          # GLM-5.3 总上下文为 1M；显式覆盖 PR Agent 的默认上下文预算。
+          config.custom_model_max_tokens: "1048576"
+          config.max_model_tokens: "1048576"
+          # 输出上限 128K；扣除输出保留后，仍有 917504 tokens 输入预算。
+          config.max_output_tokens: "131072"
+          # 与 hosted job 的 6 小时硬上限对齐；平台取消会先于本次 LiteLLM 超时。
+          config.ai_timeout: "21600"
+          # 每次 push 到开放 PR（synchronize）时，沿用下方三个 auto_* 开关完整运行。
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"
