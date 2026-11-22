@@ -1,5 +1,5 @@
 // 外层存储适配：只清反思工具输入，不改用户引用或普通回答。JSON 为现役 checkpoint serializer 合同。
-import type { Prisma, PrismaClient } from '../generated/prisma/client'
+import { Prisma, type PrismaClient, type Checkpoint, type CheckpointWrite, type SessionMessage } from '../generated/prisma/client'
 import { REFLECTION_TOOL_NAME, REFLECTION_SOURCE_INVALID_REASONS } from './values'
 type Tx = Prisma.TransactionClient
 type Row = Record<string, unknown>
@@ -54,11 +54,9 @@ function encode(value: unknown): Uint8Array<ArrayBuffer> { return new Uint8Array
 export async function purgeReflectionToolInputs(tx: Tx, ownerId: string, draftIds: string[]): Promise<void> {
   if (!draftIds.length) return
   const ids = new Set(draftIds)
-  const checkpoints = await tx.checkpoint.findMany({ where: { session: { ownerId } } })
-  const writes = await tx.checkpointWrite.findMany({ where: { session: { ownerId } } })
-  const messages = await tx.sessionMessage.findMany({ where: { session: { ownerId } } })
   const calls = new Map<string, Set<string>>()
   const links = await tx.reflectionToolInputLink.findMany({ where: { ownerId, draftId: { in: draftIds } } })
+  let { checkpoints, writes, messages } = await findCandidateCopies(tx, ownerId, draftIds, links.map(link => link.toolCallId))
   for (const link of links) {
     const known = calls.get(link.threadId) ?? new Set<string>()
     known.add(link.toolCallId); calls.set(link.threadId, known)
@@ -70,6 +68,9 @@ export async function purgeReflectionToolInputs(tx: Tx, ownerId: string, draftId
   }
   for (const row of [...checkpoints, ...writes]) collect(row.threadId, decode(row.type, row.blob))
   for (const row of messages) collect(row.sessionId, resultValue(row.attachmentsJson))
+  // 旧结果先补出调用身份，再定向读取首结果之前的快照，不能遗漏无draftId的创建参数。
+  const expanded = await findCandidateCopies(tx, ownerId, draftIds, [...new Set([...calls.values()].flatMap(set => [...set]))])
+  checkpoints = expanded.checkpoints; writes = expanded.writes; messages = expanded.messages
   for (const [threadId, toolIds] of calls) for (const toolCallId of toolIds) {
     await tx.reflectionToolInputLink.upsert({ where: { threadId_toolCallId: { threadId, toolCallId } }, create: { ownerId, threadId, toolCallId, redacted: true }, update: { redacted: true } })
   }
@@ -138,7 +139,8 @@ export async function redactedReflectionToolCallIds(tx: Tx, ownerId: string, thr
   const ids = new Set(links.filter(link => link.redacted || invalid(link)).map(link => link.toolCallId))
   // 兼容旧快照尚无调用绑定的输入；只在有失效证据时扫描，并保留已绑定的新有效版本。
   if (blocked.length) {
-    const rows = [...await tx.checkpoint.findMany({ where: { threadId, session: { ownerId } } }), ...await tx.checkpointWrite.findMany({ where: { threadId, session: { ownerId } } })]
+    const candidates = await findCandidateCopies(tx, ownerId, blocked.map(e => e.draftId), [], threadId)
+    const rows = [...candidates.checkpoints, ...candidates.writes]
     for (const row of rows) for (const id of resultCallIds(decode(row.type, row.blob), new Set(blocked.map(e => e.draftId)))) {
       const link = links.find(link => link.toolCallId === id)
       if (!link || link.redacted || invalid(link)) ids.add(id)
@@ -154,4 +156,15 @@ function hasReflectionInput(type: string, blob: Uint8Array): boolean {
 /** 普通图写维持原接缝；只有可能携带反思输入的写入才增加同事务墓碑复核。 */
 export function withReflectionInputFence<T>(prisma: PrismaClient, type: string, blob: Uint8Array, write: (tx: Tx) => Promise<T>): Promise<T> {
   return hasReflectionInput(type, blob) ? prisma.$transaction(write) : write(prisma)
+}
+
+/** 在 SQLite 预过滤身份及具体引用，只物化/解码目标副本；旧数据无需全用户装入内存。 */
+async function findCandidateCopies(tx: Tx, ownerId: string, draftIds: string[], toolCallIds: string[], threadId?: string) {
+  const needles = JSON.stringify([...draftIds, ...toolCallIds.flatMap(id => [`"id":${JSON.stringify(id)}`, `"toolCallId":${JSON.stringify(id)}`])])
+  const owner = Prisma.sql`s."ownerId" = ${ownerId} AND (${threadId ?? null} IS NULL OR s."id" = ${threadId ?? null})`
+  const match = (payload: Prisma.Sql) => Prisma.sql`instr(${payload}, ${REFLECTION_TOOL_NAME}) > 0 AND EXISTS (SELECT 1 FROM json_each(${needles}) needle WHERE instr(${payload}, needle.value) > 0)`
+  const checkpoints = await tx.$queryRaw<Checkpoint[]>(Prisma.sql`SELECT c.* FROM checkpoints c JOIN sessions s ON s.id = c."threadId" WHERE ${owner} AND ${match(Prisma.sql`CAST(c.blob AS TEXT)`)}`)
+  const writes = await tx.$queryRaw<CheckpointWrite[]>(Prisma.sql`SELECT c.* FROM checkpoint_writes c JOIN sessions s ON s.id = c."threadId" WHERE ${owner} AND ${match(Prisma.sql`CAST(c.blob AS TEXT)`)}`)
+  const messages = await tx.$queryRaw<SessionMessage[]>(Prisma.sql`SELECT c.* FROM session_messages c JOIN sessions s ON s.id = c."sessionId" WHERE ${owner} AND ${match(Prisma.sql`c."attachmentsJson"`)}`)
+  return { checkpoints, writes, messages }
 }

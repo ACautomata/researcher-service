@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "irrelevantHistoryMiB": 128,
+  "irrelevantCheckpoints": 128,
+  "durationMs": 1481.238041,
+  "maxDurationMs": 2000,
+  "heapGrowthBytes": 2132264,
+  "targetCopiesCleared": true,
+  "scope": "local synthetic capacity measurement; no model calls"
+}

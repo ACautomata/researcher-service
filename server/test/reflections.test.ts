@@ -188,15 +188,22 @@ describe('#1080 reflections 草稿链路（真实 SQLite）', () => {
     // 展示 ref 里冻结的 confirmable=false，读面按当前草稿状态实时计算为 true。
     expect(display?.confirmable).toBe(true)
 
-    const acked = await runtime.service.ackDisplay(ownerId, presentation.displayId, { version: draft.version, hash: presentation.bodyHash, messageId: message.id })
+    expect(display!.bodyHash).not.toBe(presentation.bodyHash)
+    expect(await runtime.service.ackDisplay(ownerId, presentation.displayId, { version: draft.version, hash: presentation.bodyHash, messageId: message.id })).toMatchObject({ error: 'conflict' })
+    const acked = await runtime.service.ackDisplay(ownerId, presentation.displayId, { version: draft.version, hash: display!.bodyHash, messageId: message.id })
     expect('seq' in acked).toBe(true)
     // 幂等重放返回同一序号
-    const again = await runtime.service.ackDisplay(ownerId, presentation.displayId, { version: draft.version, hash: presentation.bodyHash, messageId: message.id })
+    const again = await runtime.service.ackDisplay(ownerId, presentation.displayId, { version: draft.version, hash: display!.bodyHash, messageId: message.id })
     expect(again).toEqual(acked)
 
-    // commit 仍需要用户自然语言确认（RF-T05 未实现）
-    const commit = await runtime.service.execute(leader('run-bind'), { operation: 'commit', draft_id: draft.draft_id, version: draft.version })
-    expect(commit.error?.code).toBe('confirmation_required')
+    const confirm = await prisma.sessionMessage.create({ data: { sessionId, turn: 101, role: 'user', content: '好，就这版保存' } })
+    const trusted = { ...leader('run-bind'), triggerMessageId: confirm.id }
+    expect((await runtime.service.confirmTurn(trusted, async () => ({ decision: 'confirm' }))).status).toBe('granted')
+    const committed = await runtime.service.execute(trusted, { operation: 'commit', draft_id: draft.draft_id, version: draft.version })
+    expect(committed.outcome, JSON.stringify(committed)).toBe('success')
+    const recordId = (committed.record as { record_id: string }).record_id
+    await prisma.reflectionRecord.delete({ where: { id: recordId } })
+    await prisma.reflectionIdempotency.deleteMany({ where: { recordId } })
   })
 
   it('ack：未绑定 → not_ready；版本/hash 不符 → conflict', async () => {

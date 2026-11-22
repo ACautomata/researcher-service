@@ -150,4 +150,12 @@ describe('ReflectionBlock', () => {
     w.unmount()
   })
 
+  it('RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash', async () => {
+    getReflectionDisplay.mockResolvedValue(displayWith({ bodyHash: 'b'.repeat(64) }))
+    const wrapper = mount(ReflectionBlock, { props: { presentation, messageId: 'msg-1' } })
+    await flushPromises()
+    expect(ackReflectionDisplay).toHaveBeenCalledWith('disp-1', { version: 2, hash: 'b'.repeat(64), messageId: 'msg-1' })
+    wrapper.unmount()
+  })
+
 })

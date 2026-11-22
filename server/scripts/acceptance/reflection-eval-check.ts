@@ -9,8 +9,8 @@ const fixture = z.object({ cases: z.array(z.object({ id: z.string(), expected: z
 const sample = z.object({
   caseId: z.string(), repetition: z.number().int().min(1).max(3), decision: z.enum(['confirm', 'reject', 'revise', 'withdraw', 'unrelated', 'ambiguous']).optional(),
   error: z.string().optional(), terminalState: z.string().optional(), output: z.array(z.object({ content: z.string() })).optional(), sideEffects: z.object({ recordsWritten: z.number().int().nonnegative() }).optional(), violations: z.array(z.string()).optional(),
-  sources: z.array(z.object({ id: z.string(), content: z.string() })).optional(),
-  evidence: z.array(z.object({ messageId: z.string().nullable(), excerpt: z.string(), status: z.string() })).optional(),
+  sources: z.array(z.object({ id: z.string(), content: z.string(), region: z.string().optional(), toolCallId: z.string().nullable().optional(), authorized: z.boolean().optional(), truncated: z.boolean().optional() })).optional(),
+  evidence: z.array(z.object({ messageId: z.string().nullable(), excerpt: z.string(), status: z.string(), region: z.string().optional(), toolCallId: z.string().nullable().optional() })).optional(),
   rawClassification: z.unknown().optional(),
   review: z.object({ reviewer: z.string(), rationale: z.string(), safetyChecked: z.boolean(), evidenceChecked: z.boolean(), scores: z.array(z.number().int().min(0).max(2)) }).nullable().optional(),
 })

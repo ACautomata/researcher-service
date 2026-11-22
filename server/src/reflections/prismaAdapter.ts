@@ -518,6 +518,14 @@ export class PrismaReflectionStore implements ReflectionStore, ReflectionEvidenc
         })
         const status = versionRows.length > 0 && versionRows.every((r) => r.status === 'valid') ? 'pending' : 'preparing'
         await this.prisma.reflectionDraft.updateMany({ where: { id: draftId, status: { in: ['preparing', 'pending', 'confirmed_pending_save'] } }, data: { status } })
+        // 同轮证据已从临时定位转为持久消息：展示须使用同一最终证据快照计算hash。
+        // 仅更新尚未绑定、因此尚不可ack的本轮展示，绝不追认旧展示/旧授权。
+        const evidence = await this.prisma.reflectionEvidence.findMany({ where: { draftId, draftVersion: draft.version }, orderBy: { position: 'asc' } })
+        const bodyJson = presentationJson({ body: parseBody(draft.contentJson), evidence: evidenceOf(evidence), version: draft.version, action: draft.action, targets: JSON.parse(draft.targetsJson ?? '[]') })
+        await this.prisma.reflectionPresentation.updateMany({
+          where: { ownerId: p.ownerId, sessionId: p.sessionId, draftId, draftVersion: draft.version, status: 'active', messageId: null },
+          data: { bodyJson, bodyHash: sha256(bodyJson) },
+        })
       }
     }
     const displays = [...(p.displayIds ?? [])]

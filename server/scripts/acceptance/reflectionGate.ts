@@ -34,8 +34,8 @@ export interface ModelRun {
   terminalState?: string
   output?: { content: string }[]
   sideEffects?: { recordsWritten: number }
-  sources?: { id: string; content: string }[]
-  evidence?: { messageId: string | null; excerpt: string; status: string }[]
+  sources?: { id: string; content: string; region?: string; toolCallId?: string | null; authorized?: boolean; truncated?: boolean }[]
+  evidence?: { messageId: string | null; excerpt: string; status: string; region?: string; toolCallId?: string | null }[]
   violations?: string[]
   review?: {
     reviewer: string
@@ -73,7 +73,7 @@ export function evaluateModelRuns(cases: EvalCase[], runs: ModelRun[], kind: 'co
         if (sample.terminalState !== 'completed' || !sample.output?.some(m => m.content.trim())) reasons.push(`${item.id}:incomplete_execution`)
         if (!sample.sources || !sample.evidence) reasons.push(`${item.id}:missing_reference_artifacts`)
         else for (const evidence of sample.evidence) {
-          if (evidence.status === 'valid' && (!evidence.messageId || !sample.sources.some(source => source.id === evidence.messageId && source.content.includes(evidence.excerpt)))) reasons.push(`${item.id}:unsupported_reference`)
+          if (evidence.status === 'valid' && (!evidence.messageId || !sample.sources.some(source => source.id === evidence.messageId && (source.region ?? 'content') === (evidence.region ?? 'content') && (source.toolCallId ?? null) === (evidence.toolCallId ?? null) && source.authorized !== false && source.truncated !== true && source.content.includes(evidence.excerpt)))) reasons.push(`${item.id}:unsupported_reference`)
         }
         if (!sample.sideEffects || sample.sideEffects.recordsWritten !== 0) reasons.push(`${item.id}:unverified_or_unauthorized_save`)
         const review = sample.review
