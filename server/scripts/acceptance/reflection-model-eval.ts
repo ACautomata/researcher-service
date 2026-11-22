@@ -15,6 +15,7 @@ import { fakePrimitives, CollectingHub } from '../../test/runnerFakes'
 import { AnalysisCaseSchema, createAnalysisFixture, type AnalysisCase } from './reflection-fixtures'
 import { installAbortRejectionGuard } from '../../src/runner/runtime/abortGuard'
 import { REFLECTION_GUIDANCE_VERSION } from '../../src/runner/reflectionTool'
+import { createEvalHarness, createEvalModel, EvalHarnessError, maxRequestsFromEnv } from './reflectionEvalHarness'
 
 const root = resolve(__dirname, '../../..')
 async function main() {
@@ -30,13 +31,33 @@ const fixtureText = readFileSync(join(root, source), 'utf8')
 const fixture = JSON.parse(fixtureText)
 const promptFile = kind === 'confirmation' ? 'server/src/runner/reflectionConfirmation.ts' : 'server/src/runner/reflectionTool.ts'
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
+const thinkingEnv = process.env.RF_EVAL_THINKING
+if (thinkingEnv !== undefined && thinkingEnv !== 'enabled' && thinkingEnv !== 'disabled') throw new Error('RF_EVAL_THINKING must be enabled|disabled')
+const sampling = {
+  temperature: 0,
+  maxTokens: kind === 'confirmation' ? 500 : 6000,
+  ...(thinkingEnv !== undefined ? { thinking: thinkingEnv as 'enabled' | 'disabled' } : {}),
+}
+const maxRequests = maxRequestsFromEnv()
 const report: Record<string, unknown> = {
-  status: 'not_run', kind, reviewer: 'jrz', commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+  status: 'not_run', kind,
+  // 评分尚未发生，不冒用任何具名审阅者；评分阶段写入实际 AI 代评主体与模型版本。
+  reviewer: null,
+  reviewMethod: 'ai_delegate',
+  reviewerModelVersion: null,
+  reviewAuthorization: {
+    change: 'named_human_review_replaced_by_ai_delegate',
+    authorizedBy: 'jrz',
+    authorizationDate: '2026-11-22',
+    basis: 'explicit_user_instruction_in_session',
+    humanReviewPerformed: false,
+  },
+  commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   fixtureSha256: hash(fixtureText), promptSha256: hash(readFileSync(join(root, promptFile), 'utf8')),
   promptVersion: kind === 'confirmation' ? 'rf-confirmation-1088-v1' : REFLECTION_GUIDANCE_VERSION,
-  provider: protocol, model: modelId ?? null, modelVersion: null,
+  provider: protocol, model: modelId ?? null, modelVersion: null, modelVersions: [],
   scenarioConstructionComplete: true,
-  sampling: { temperature: 0, maxTokens: kind === 'confirmation' ? 500 : 6000 }, runs: [],
+  sampling, runs: [],
 }
 // 独占创建，拒绝覆盖先前证据；每次样本完成即落盘，失败也保留进度。
 writeFileSync(resolve(output), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' })
@@ -47,16 +68,30 @@ if (!apiKey || !modelId || !baseUrl) {
   process.exitCode = 2
 } else {
   installAbortRejectionGuard()
-  const model = (await defaultFactory(modelId, {
+  const harness = createEvalHarness({ maxRequests, modelId, sampling })
+  report.budget = harness.budget
+  report.samplingVerification = harness.samplingVerification
+  const timeoutFetch: typeof fetch = (input, init) => fetch(input, {
+    ...init,
+    signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+  })
+  const model = await createEvalModel(defaultFactory, modelId, {
     lcProvider: protocol as 'openai' | 'anthropic', apiKey, baseUrl, authHeader: protocol === 'anthropic',
-    fetch: (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000) }),
-  })).withConfig({ configurable: report.sampling as Record<string, unknown> })
+    fetch: harness.wrapFetch(timeoutFetch),
+  }, sampling, harness.collector)
   const runs: Record<string, unknown>[] = []
   report.runs = runs
   report.status = 'running'
   for (const item of fixture.cases) for (let repetition = 1; repetition <= 3; repetition++) {
     const sample: Record<string, unknown> = { caseId: item.id, repetition, startedAt: new Date().toISOString(), review: null, violations: [] }
     runs.push(sample)
+    // 超额或报文参数不符时不再发任何请求；剩余样本仍保留在原分母并明确标错。
+    if (harness.budget.exhausted || harness.samplingVerification.mismatch.length > 0) {
+      sample.error = harness.budget.exhausted ? 'request_budget_exhausted' : 'sampling_parameter_mismatch'
+      sample.finishedAt = new Date().toISOString()
+      persist()
+      continue
+    }
     try {
       if (kind === 'confirmation') {
         const classifier = createReflectionConfirmationClassifier(RunnableLambda.from(async (input, config) => {
@@ -76,14 +111,19 @@ if (!apiKey || !modelId || !baseUrl) {
         Object.assign(sample, await analyze(item, model, modelId))
         if (sample.terminalState !== 'completed') sample.error = 'analysis_did_not_complete'
       }
-    } catch {
-      // 网络错误正文可能包含 endpoint/credential，原样错误不得进入交接产物。
-      sample.error = 'model_or_harness_execution_failed'
+    } catch (error) {
+      // 网络错误正文可能包含 endpoint/credential，原样错误不得进入交接产物；只保留
+      // 固定分类与（无密钥的）错误码，确保预算/参数失败能与模型执行失败区分。
+      sample.error = error instanceof EvalHarnessError ? error.code : 'model_or_harness_execution_failed'
+      const code = (error as { code?: unknown }).code
+      if (!(error instanceof EvalHarnessError) && typeof code === 'string') sample.errorCode = code
     }
+    report.modelVersion = harness.modelVersion() ?? 'provider_not_reported'
+    report.modelVersions = harness.modelVersions()
     sample.finishedAt = new Date().toISOString(); persist()
-    console.log(`${kind} ${item.id} ${repetition}/3 ${sample.error ? 'ERROR' : 'recorded; pending human review'}`)
+    console.log(`${kind} ${item.id} ${repetition}/3 ${sample.error ? 'ERROR' : 'recorded; pending AI review'}`)
   }
-  report.status = 'pending_human_review'; persist()
+  report.status = 'pending_ai_review'; persist()
 }
 
 }
