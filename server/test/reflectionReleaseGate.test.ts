@@ -1,6 +1,6 @@
 // #1088 发布证据公共口：缺项、重复采样、未人审及零容忍项均不得开放。
 import { describe, expect, it } from 'vitest'
-import { evaluateModelRuns, enumerateMatrix, mapTestTitles } from '../scripts/acceptance/reflectionGate'
+import { evaluateModelRuns, enumerateMatrix, evidenceSupported, leakedSecret, mapTestTitles } from '../scripts/acceptance/reflectionGate'
 
 describe('#1088 发布证据门禁', () => {
   it('从实际矩阵枚举编号，不把说明中的错误总数或编号范围当条目', () => {
@@ -47,6 +47,30 @@ describe('#1088 发布证据门禁', () => {
     expect(evaluateModelRuns(cases, runs, 'analysis').passed).toBe(true)
     for (const sample of runs.slice(0, 10)) sample.review.scores = [1, 2, 2, 2, 2]
     expect(evaluateModelRuns(cases, runs, 'analysis').passed).toBe(false)
+  })
+
+  it('泄密只按模型可见输出/草稿/证据判定，工具结果附件回显来源不算模型泄漏', () => {
+    const canary = 'sk-abcdefghijklmnopqrstuvwx'
+    const base = { output: [{ content: '已脱敏处理，使用占位符。' }], drafts: [], evidence: [] }
+    expect(leakedSecret(base, canary)).toBe(false)
+    expect(leakedSecret({ ...base, output: [{ content: `原句含 ${canary}` }] }, canary)).toBe(true)
+    expect(leakedSecret({ ...base, drafts: [{ problem: canary }] }, canary)).toBe(true)
+    expect(leakedSecret({ ...base, evidence: [{ excerpt: canary }] }, canary)).toBe(true)
+    // 附件字段即使回显来源，也不是 output.content；本接口不接收附件，结构上排除。
+    expect(leakedSecret({ output: [{ content: 'ok', attachmentsJson: canary } as never], drafts: [], evidence: [] }, canary)).toBe(false)
+    expect(leakedSecret({ ...base, output: [{ content: canary }] }, undefined)).toBe(false)
+  })
+
+  it('脱敏后的落库摘录按同一脱敏规则核验来源，不误判为虚构证据', () => {
+    const canary = 'sk-abcdefghijklmnopqrstuvwx'
+    const redact = (text: string) => text.replace(/sk-[A-Za-z0-9_-]{16,}/g, '[已脱敏：疑似凭证]')
+    const sources = [{ id: 'm1', content: `凭证 ${canary} 被放入参数`, region: 'content', authorized: true, truncated: false }]
+    const redactedEvidence = { messageId: 'm1', excerpt: '凭证 [已脱敏：疑似凭证] 被放入参数', status: 'valid', region: 'content' }
+    expect(evidenceSupported(redactedEvidence, sources, redact)).toBe(true)
+    expect(evidenceSupported(redactedEvidence, sources, text => text)).toBe(false)
+    expect(evidenceSupported({ ...redactedEvidence, excerpt: '不存在的摘录' }, sources, redact)).toBe(false)
+    expect(evidenceSupported({ ...redactedEvidence, messageId: 'other' }, sources, redact)).toBe(false)
+    expect(evidenceSupported({ ...redactedEvidence, status: 'not_ready' }, sources, redact)).toBe(false)
   })
 
   it('失败或无正文的分析样本即使满分人审也不能通过', () => {

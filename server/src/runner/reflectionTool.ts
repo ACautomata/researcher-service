@@ -10,12 +10,17 @@ import { REFLECTION_TOOL_NAME } from '../reflections/values'
 import type { ReflectionDraftStatus } from '../reflections/values'
 import { currentReflectionFrame, reflectionFrameIsLeader } from './reflectionFrame'
 
-export const REFLECTION_GUIDANCE_VERSION = 'rf-t10-v1'
+export const REFLECTION_GUIDANCE_VERSION = 'rf-t10-v3'
 
 export const REFLECTION_LEADER_GUIDANCE = `反思仅供 Leader：用户明确要求复盘，或发生明确失败、用户纠正、重复错误时才分析，不强制每轮检索。
 按需求理解、计划、工具使用、验证、效率、信息获取检查工作过程。顺序：确定问题与用户指定范围→按需检索历史和经验→阅读原始产品消息→列事实、证据和缺失→分析推测→判断有无新教训。
 用户指定范围优先；否则先 session_history search 再按稳定引用 read，已知可靠位置可直读。说明实际已读范围、截断及缺失，不用 checkpoint 绕过保存投影截断，不把旧反思当事实来源。
 有新教训才起五部分草稿：问题与影响、原始证据、原因分析、可执行改进、适用范围。事实必须关联原始证据，推测显式标注；建议写成“遇到条件 X，采取具体动作 Y”，列出排除条件。
+已保存的产品消息（含 assistant 消息与工具结果）就是可引用的原始证据；有明确失败、用户纠正或新证据版本时，即使只有一条已保存消息，也应按五部分起草并在草稿中标注缺口，不要因为缺少“用户原话”而拒绝起草。无新教训、旧经验已覆盖或仅摘要不可用时才不起草。
+判断有新教训后，必须调用 reflection_records 的 draft 创建五部分草稿，再用 present 展示完整动作；只把草稿写在回复正文里不算，未经 present 不能进入确认。等待用户自然语言确认期间继续原任务，不要以确认 pending 中断，也不要在起草前先问“要不要起草”。
+同一查询最多重试两次；busy、invalid_state、执行槽满不是“无命中”。检索失败后记录缺口并继续原任务，不换关键词反复循环，也不把不可用通道当作空历史。
+任何回复、草稿和证据摘录都不得复述凭证、token 或密钥原文；来源中出现疑似凭证时用脱敏占位符，并说明它对证据充分性的影响。
+查已有经验时先做无 query 目录检索，再按类别、标题或 record_id 核对；单个关键词未命中不能断言库里没有记录。
 无新教训则说明不新增；证据不足则说明缺口，不虚构或用旧反思自证。当前轮未落库的来源只能 preparing，待 recordTurn 核验后可确认。
 同主请求同问题/证据版本只分析一次，episode 持久化；不要换标题或换词循环起草。新失败、用户纠正或新证据版本才允许再分析。反思失败不会递归触发反思。
 用 present 展示完整动作和目标基准；等待自然语言确认期间继续原任务，不以确认 pending 中断任务。用户仅要求复盘时以分析为主。
