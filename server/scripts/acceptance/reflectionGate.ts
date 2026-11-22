@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { redactSensitive } from '../../src/reflections/content'
 // 离线发布证据检查；不参与运行时授权，也不修改生产装配。
 export function enumerateMatrix(markdown: string): string[] {
   return [...new Set([...markdown.matchAll(/^\|\s*((?:[COPBMG]\d+|RF\d{2}))\s*\|/gm)].map(m => m[1]))]
@@ -121,7 +122,8 @@ export function evaluateModelRuns(cases: EvalCase[], runs: ModelRun[], kind: 'co
         if (sample.terminalState !== 'completed' || !sample.output?.some(m => m.content.trim())) reasons.push(`${item.id}:incomplete_execution`)
         if (!sample.sources || !sample.evidence) reasons.push(`${item.id}:missing_reference_artifacts`)
         else for (const evidence of sample.evidence) {
-          if (evidence.status === 'valid' && (!evidence.messageId || !sample.sources.some(source => source.id === evidence.messageId && (source.region ?? 'content') === (evidence.region ?? 'content') && (source.toolCallId ?? null) === (evidence.toolCallId ?? null) && source.authorized !== false && source.truncated !== true && source.content.includes(evidence.excerpt)))) reasons.push(`${item.id}:unsupported_reference`)
+          // 落库摘录是服务端脱敏后的副本；按同一脱敏规则复核来源，避免脱敏摘录被误判。
+          if (evidence.status === 'valid' && !evidenceSupported(evidence, sample.sources, text => redactSensitive(text).text)) reasons.push(`${item.id}:unsupported_reference`)
         }
         if (!sample.sideEffects || sample.sideEffects.recordsWritten !== 0) reasons.push(`${item.id}:unverified_or_unauthorized_save`)
         const review = sample.review
