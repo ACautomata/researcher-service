@@ -16,147 +16,147 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"list\"}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"session_ids\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"range\":{\"from_turn\":1}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"fields\":[\"thinking\"]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"  \"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"x\",\"mode\":\"sql\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-01-01T00:00:00\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-30T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"query\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"title\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"time\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"fields\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"range\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{\"from_turn\":9,\"to_turn\":1}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "title": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
@@ -179,14 +179,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C5：消息时间前闭后开，read 同会话不同范围各自保持，不串目标",
           "title": "C2/C5：消息时间前闭后开，read 同会话不同范围各自保持，不串目标",
@@ -213,84 +213,84 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 alpha",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 研究",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 a.b",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 lookup",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具结果",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 Alpha 研究 a.b工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 toolCallId",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C12：长字段节选与源截断独立，匹配后 read 能按稳定引用读全保存文本",
           "title": "C3/C12：长字段节选与源截断独立，匹配后 read 能按稳定引用读全保存文本",
@@ -309,7 +309,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C4/C5：ID/标题/时间/关键词交集，消息时间与关键词须落在同一行",
           "title": "C4/C5：ID/标题/时间/关键词交集，消息时间与关键词须落在同一行",
@@ -344,168 +344,168 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"list\"}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"session_ids\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"range\":{\"from_turn\":1}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"fields\":[\"thinking\"]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"  \"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"x\",\"mode\":\"sql\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-01-01T00:00:00\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-30T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"query\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"title\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"time\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"fields\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"range\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{\"from_turn\":9,\"to_turn\":1}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C5/C11：带时区且合法的日历时间",
           "title": "C5/C11：带时区且合法的日历时间",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C4/C5：ID/标题/时间/关键词交集，消息时间与关键词须落在同一行",
           "title": "C4/C5：ID/标题/时间/关键词交集，消息时间与关键词须落在同一行",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C5：消息时间前闭后开，read 同会话不同范围各自保持，不串目标",
           "title": "C2/C5：消息时间前闭后开，read 同会话不同范围各自保持，不串目标",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C5：SQLite UTC 文本时间与 Prisma 毫秒时间同义，时间筛选不受宿主时区影响",
           "title": "C5：SQLite UTC 文本时间与 Prisma 毫秒时间同义，时间筛选不受宿主时区影响",
@@ -532,119 +532,119 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 [",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (a+)+",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (a|aa)+",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (?=x)",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (x)\\1",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 a{1,1001}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 alpha",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 研究",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 a.b",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 lookup",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具结果",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 Alpha 研究 a.b工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 toolCallId",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C6：regex 显式切换；大小写可选；普通标点没有正则含义",
           "title": "C6：regex 显式切换；大小写可选；普通标点没有正则含义",
@@ -667,14 +667,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7：turn 闭区间、单端、空范围与编号空洞",
           "title": "C7：turn 闭区间、单端、空范围与编号空洞",
@@ -697,14 +697,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C8/O10：上下文重叠合并且不跨会话",
           "title": "C8/O10：上下文重叠合并且不跨会话",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C8/B10：跨页续读保留命中前的上下文，不从头取消息",
           "title": "C8/B10：跨页续读保留命中前的上下文，不从头取消息",
@@ -723,140 +723,140 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"list\"}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"session_ids\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"range\":{\"from_turn\":1}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"fields\":[\"thinking\"]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"  \"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"x\",\"mode\":\"sql\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-01-01T00:00:00\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-30T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"query\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"title\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"time\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"fields\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"range\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{\"from_turn\":9,\"to_turn\":1}}]}",
@@ -875,7 +875,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "title": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
@@ -898,147 +898,147 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"list\"}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"session_ids\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"range\":{\"from_turn\":1}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"fields\":[\"thinking\"]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"  \"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"x\",\"mode\":\"sql\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-01-01T00:00:00\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-30T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"query\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"title\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"time\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"fields\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"range\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{\"from_turn\":9,\"to_turn\":1}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C5/C11：带时区且合法的日历时间",
           "title": "C5/C11：带时区且合法的日历时间",
@@ -1061,77 +1061,77 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 alpha",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 研究",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 a.b",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 lookup",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 工具结果",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 独立推理",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 Alpha 研究 a.b工具输入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C6/C12：逐产品区域匹配 %s",
           "title": "C3/C6/C12：逐产品区域匹配 toolCallId",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C3/C12：长字段节选与源截断独立，匹配后 read 能按稳定引用读全保存文本",
           "title": "C3/C12：长字段节选与源截断独立，匹配后 read 能按稳定引用读全保存文本",
@@ -1150,140 +1150,140 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"list\"}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"session_ids\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"range\":{\"from_turn\":1}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"fields\":[\"thinking\"]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"  \"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"query\":{\"text\":\"x\",\"mode\":\"sql\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-01-01T00:00:00\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-30T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"search\",\"time\":{\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\"}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"query\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"title\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"time\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"fields\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"context\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\"}],\"range\":{}}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{}}]}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C1/C5/C9/C11/C13：拒绝非法组合 %j",
           "title": "C1/C5/C9/C11/C13：拒绝非法组合 {\"operation\":\"read\",\"targets\":[{\"session_id\":\"s\",\"range\":{\"from_turn\":9,\"to_turn\":1}}]}",
@@ -1302,7 +1302,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "title": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
@@ -1321,7 +1321,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
           "title": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
@@ -1340,7 +1340,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "title": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
@@ -1359,7 +1359,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
           "title": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
@@ -1378,7 +1378,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
@@ -1401,14 +1401,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryApi.test.ts",
           "template": "O5 fork 全件：溯源行 + checkpoint/消息/journal/attachments 截断复制 + created{source:fork} 帧 + 沙箱字面复制调用",
           "title": "O5 fork 全件：溯源行 + checkpoint/消息/journal/attachments 截断复制 + created{source:fork} 帧 + 沙箱字面复制调用",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
@@ -1427,7 +1427,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
           "title": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
@@ -1446,7 +1446,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
           "title": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
@@ -1465,7 +1465,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
           "title": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
@@ -1484,7 +1484,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
           "title": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
@@ -1503,7 +1503,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C8/O10：上下文重叠合并且不跨会话",
           "title": "C8/O10：上下文重叠合并且不跨会话",
@@ -1522,7 +1522,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O11：目录按边界内最新消息时间降序、ID 兜底，空会话回退创建时间",
           "title": "O11：目录按边界内最新消息时间降序、ID 兜底，空会话回退创建时间",
@@ -1545,14 +1545,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "title": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
@@ -1571,7 +1571,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O13/B2：长消息分段连续重组，字面命中可跨段边界",
           "title": "O13/B2：长消息分段连续重组，字面命中可跨段边界",
@@ -1590,7 +1590,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
           "title": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
@@ -1609,7 +1609,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O15/M7：普通追加、标题与模型设置不推进版本，消息上界冻结",
           "title": "O15/M7：普通追加、标题与模型设置不推进版本，消息上界冻结",
@@ -1632,14 +1632,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "title": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O16/P12：搜索续读对尚未开始的已变化会话给出 changed 标记",
           "title": "O16/P12：搜索续读对尚未开始的已变化会话给出 changed 标记",
@@ -1658,7 +1658,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O17/P9：续读中途失权拒绝交付",
           "title": "O17/P9：续读中途失权拒绝交付",
@@ -1677,7 +1677,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
@@ -1696,7 +1696,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "title": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
@@ -1715,7 +1715,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
           "title": "O6/O7/O8/O9/O20：证据结构与节选/源截断/分段标识互不掩盖",
@@ -1734,7 +1734,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
@@ -1757,14 +1757,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "title": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
           "title": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
@@ -1783,28 +1783,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 foreign 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 hidden 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 teammate 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 absent 与不存在目标同形，admin 无越权",
@@ -1827,35 +1827,35 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "title": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 foreign 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 hidden 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 teammate 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 absent 与不存在目标同形，admin 无越权",
@@ -1874,7 +1874,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "title": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
@@ -1893,28 +1893,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 foreign 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 hidden 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 teammate 与不存在目标同形，admin 无越权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P2/P3/P5：显式 %s 与不存在目标同形，admin 无越权",
           "title": "P2/P3/P5：显式 absent 与不存在目标同形，admin 无越权",
@@ -1933,7 +1933,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
@@ -1952,7 +1952,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P7：当前会话有专门提示，不能当历史读取",
           "title": "P7：当前会话有专门提示，不能当历史读取",
@@ -1971,7 +1971,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
           "title": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
@@ -1994,14 +1994,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O17/P9：续读中途失权拒绝交付",
           "title": "O17/P9：续读中途失权拒绝交付",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
           "title": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
@@ -2024,14 +2024,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
           "title": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P10：未知/篡改书签返回同形拒绝，不泄露目标",
           "title": "P10：未知/篡改书签返回同形拒绝，不泄露目标",
@@ -2054,14 +2054,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "title": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
           "title": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
@@ -2092,28 +2092,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "title": "O2/O12/O19/P11/P12：部分成功、失败目标贯穿续页且不泄露元数据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "title": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
           "title": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O16/P12：搜索续读对尚未开始的已变化会话给出 changed 标记",
           "title": "O16/P12：搜索续读对尚未开始的已变化会话给出 changed 标记",
@@ -2132,7 +2132,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "title": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
@@ -2151,7 +2151,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
@@ -2170,7 +2170,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P15/P16：真实适配器故障及读取上限不冒充空历史，错误脱敏",
           "title": "P15/P16：真实适配器故障及读取上限不冒充空历史，错误脱敏",
@@ -2189,7 +2189,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P15/P16：真实适配器故障及读取上限不冒充空历史，错误脱敏",
           "title": "P15/P16：真实适配器故障及读取上限不冒充空历史，错误脱敏",
@@ -2212,14 +2212,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P17/M5：坏聚合保留正文，标明缺失且不当作空历史",
           "title": "P17/M5：坏聚合保留正文，标明缺失且不当作空历史",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P17/M5：混合坏字段保留可靠工具片段，缺失调用标识不补造",
           "title": "P17/M5：混合坏字段保留可靠工具片段，缺失调用标识不补造",
@@ -2242,14 +2242,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "P18：正式精简访问日志无 query/正文/书签",
           "title": "P18：正式精简访问日志无 query/正文/书签",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P18/P19：日志白名单无 query/正文/书签；日志失败告警且已授权读取继续",
           "title": "P18/P19：日志白名单无 query/正文/书签；日志失败告警且已授权读取继续",
@@ -2272,14 +2272,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
           "title": "P8/P9/P19：每次调用重新核实用户与可见性，权限无法核实拒绝交付",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P18/P19：日志白名单无 query/正文/书签；日志失败告警且已授权读取继续",
           "title": "P18/P19：日志白名单无 query/正文/书签；日志失败告警且已授权读取继续",
@@ -2298,7 +2298,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B1/B3：只匹配产品字段，中文短词可查且不做近义/繁体扩展",
           "title": "B1/B3：只匹配产品字段，中文短词可查且不做近义/繁体扩展",
@@ -2317,7 +2317,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O13/B2：长消息分段连续重组，字面命中可跨段边界",
           "title": "O13/B2：长消息分段连续重组，字面命中可跨段边界",
@@ -2336,7 +2336,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B1/B3：只匹配产品字段，中文短词可查且不做近义/繁体扩展",
           "title": "B1/B3：只匹配产品字段，中文短词可查且不做近义/繁体扩展",
@@ -2355,7 +2355,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B4/M6：独立执行进程只读打开可信 SQLite 路径，真实搜索可用",
           "title": "B4/M6：独立执行进程只读打开可信 SQLite 路径，真实搜索可用",
@@ -2374,7 +2374,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B5：协作超时立即停止，硬超时由执行进程真实终止且随后可复用",
           "title": "B5：协作超时立即停止，硬超时由执行进程真实终止且随后可复用",
@@ -2393,7 +2393,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B6：取消立即终止执行并释放执行槽，迟到结果不交付",
           "title": "B6：取消立即终止执行并释放执行槽，迟到结果不交付",
@@ -2412,7 +2412,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
           "title": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
@@ -2431,7 +2431,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
@@ -2450,7 +2450,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
           "title": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
@@ -2473,14 +2473,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
           "title": "O1/O3/B10：空页仍有待扫描不报完成，进度与书签可续读",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C8/B10：跨页续读保留命中前的上下文，不从头取消息",
           "title": "C8/B10：跨页续读保留命中前的上下文，不从头取消息",
@@ -2499,7 +2499,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
           "title": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
@@ -2518,7 +2518,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B12：每主请求 10 次/30s/256KiB 含失败与重试；恢复延续不重新发放",
           "title": "B12：每主请求 10 次/30s/256KiB 含失败与重试；恢复延续不重新发放",
@@ -2537,7 +2537,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
           "title": "O14/P10/B13：书签绑定身份、条件与绝对到期；重启失效",
@@ -2564,21 +2564,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
           "title": "B7/B9/B14：可注入目标上限、响应字节上限与书签容量",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B14/M9：全平台书签容量与单状态元数据上限显式拒绝",
           "title": "B14/M9：全平台书签容量与单状态元数据上限显式拒绝",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B18/B14：候选会话冻结上限显式停止，不把未扫描目录报成完整",
           "title": "B18/B14：候选会话冻结上限显式停止，不把未扫描目录报成完整",
@@ -2597,7 +2597,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "B15/B17：文本按 Unicode 码点限长，正则超限拒绝且不静默截短",
           "title": "B15/B17：文本按 Unicode 码点限长，正则超限拒绝且不静默截短",
@@ -2616,7 +2616,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B16：正则单字段超限标未完成，不静默回退为无命中",
           "title": "B16：正则单字段超限标未完成，不静默回退为无命中",
@@ -2639,49 +2639,49 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 [",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (a+)+",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (a|aa)+",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (?=x)",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 (x)\\1",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C6/B17：非法或危险正则明确报参数错误 %s",
           "title": "C6/B17：非法或危险正则明确报参数错误 a{1,1001}",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "B15/B17：文本按 Unicode 码点限长，正则超限拒绝且不静默截短",
           "title": "B15/B17：文本按 Unicode 码点限长，正则超限拒绝且不静默截短",
@@ -2704,14 +2704,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "title": "C7/O4/O18/O12/O21/B8/B18：多目标 read 按目标顺序分页，覆盖完整且引用稳定",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B18/B14：候选会话冻结上限显式停止，不把未扫描目录报成完整",
           "title": "B18/B14：候选会话冻结上限显式停止，不把未扫描目录报成完整",
@@ -2730,7 +2730,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B19：剩余额度优先于单次上限，交付前计量且不超额",
           "title": "B19：剩余额度优先于单次上限，交付前计量且不超额",
@@ -2749,7 +2749,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B20/M9：重启旧书签失效；书签状态归服务级注册表而非执行进程",
           "title": "B20/M9：重启旧书签失效；书签状态归服务级注册表而非执行进程",
@@ -2768,7 +2768,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B21：1000 消息真实扫描在协作时限内完成，预算不可达不静默放宽",
           "title": "B21：1000 消息真实扫描在协作时限内完成，预算不可达不静默放宽",
@@ -2787,7 +2787,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
           "title": "C1/C10/P3/P4/M1：无 query 仅发现本人非当前、可见主会话目录",
@@ -2810,14 +2810,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "title": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
           "title": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
@@ -2836,7 +2836,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "M3：业务核心不导入数据库/REST/图/执行器，不调用投影或 checkpoint",
           "title": "M3：业务核心不导入数据库/REST/图/执行器，不调用投影或 checkpoint",
@@ -2855,7 +2855,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
           "title": "C2/C3/O5/P6/P14/M4：读取保存的正文/thinking/工具及附件引用，排除归档消息",
@@ -2878,14 +2878,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P17/M5：坏聚合保留正文，标明缺失且不当作空历史",
           "title": "P17/M5：坏聚合保留正文，标明缺失且不当作空历史",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P17/M5：混合坏字段保留可靠工具片段，缺失调用标识不补造",
           "title": "P17/M5：混合坏字段保留可靠工具片段，缺失调用标识不补造",
@@ -2908,14 +2908,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B4/M6：独立执行进程只读打开可信 SQLite 路径，真实搜索可用",
           "title": "B4/M6：独立执行进程只读打开可信 SQLite 路径，真实搜索可用",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "M6：真实连接层拒绝写入；成功和异常路径均关闭连接",
           "title": "M6：真实连接层拒绝写入；成功和异常路径均关闭连接",
@@ -2946,28 +2946,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O15/M7：普通追加、标题与模型设置不推进版本，消息上界冻结",
           "title": "O15/M7：普通追加、标题与模型设置不推进版本，消息上界冻结",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "title": "O16/M7/P12：旧内容变化使目标局部失效，其他目标继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
           "title": "M7/P11/P12：归档目标局部失效且不泄露元数据，其他目标继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "M7：删除消息、归档行写入、rewind 批量归档与 fork 复制遵守版本语义",
           "title": "M7：删除消息、归档行写入、rewind 批量归档与 fork 复制遵守版本语义",
@@ -2986,7 +2986,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
           "title": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
@@ -3013,21 +3013,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
           "title": "B11/M8/M9：每用户 1、全局 4 执行槽；满额立即 busy 不排队；dispose 释放资源",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "B20/M9：重启旧书签失效；书签状态归服务级注册表而非执行进程",
           "title": "B20/M9：重启旧书签失效；书签状态归服务级注册表而非执行进程",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryPaging.test.ts",
           "template": "B14/M9：全平台书签容量与单状态元数据上限显式拒绝",
           "title": "B14/M9：全平台书签容量与单状态元数据上限显式拒绝",
@@ -3050,14 +3050,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "title": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G1：插件撞核心保留名在注册时失败，即使未传核心名集合",
           "title": "G1：插件撞核心保留名在注册时失败，即使未传核心名集合",
@@ -3076,7 +3076,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "title": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
@@ -3107,28 +3107,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3：生产组合根缺省不注入；手工调用未知工具不可读取历史",
           "title": "G3：生产组合根缺省不注入；手工调用未知工具不可读取历史",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3/G4：普通 teammate 不装配历史工具",
           "title": "G3/G4：普通 teammate 不装配历史工具",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3：wiki-update 治理图没有历史工具或对应指引",
           "title": "G3：wiki-update 治理图没有历史工具或对应指引",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3/G5：general-purpose 子助手显式工具集排除历史工具和 Leader 指引",
           "title": "G3/G5：general-purpose 子助手显式工具集排除历史工具和 Leader 指引",
@@ -3151,14 +3151,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3/G4：普通 teammate 不装配历史工具",
           "title": "G3/G4：普通 teammate 不装配历史工具",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryService.test.ts",
           "template": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
           "title": "P1/M2/G4：手工误路由非 leader 被执行入口拒绝",
@@ -3181,14 +3181,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "title": "G1/G2/G5/P13：Leader 发现→读取稳定引用；免审批，历史指令仅作证据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerHistoryAssembly.test.ts",
           "template": "G3/G5：general-purpose 子助手显式工具集排除历史工具和 Leader 指引",
           "title": "G3/G5：general-purpose 子助手显式工具集排除历史工具和 Leader 指引",
@@ -3211,14 +3211,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "G6/G7：稳定主请求身份 ≠ runId，审批恢复延续同一账本；不同用户互不共享",
           "title": "G6/G7：稳定主请求身份 ≠ runId，审批恢复延续同一账本；不同用户互不共享",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "G6：resume 找不到持久账本时停止增强，不重新发放额度",
           "title": "G6：resume 找不到持久账本时停止增强，不重新发放额度",
@@ -3241,14 +3241,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "title": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "G6/G7：稳定主请求身份 ≠ runId，审批恢复延续同一账本；不同用户互不共享",
           "title": "G6/G7：稳定主请求身份 ≠ runId，审批恢复延续同一账本；不同用户互不共享",
@@ -3271,14 +3271,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF11/G8 旧经验冲突时读管理版本，不把失效经验作为主动依据",
           "title": "RF11/G8 旧经验冲突时读管理版本，不把失效经验作为主动依据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "G8/G9：限额停止状态由真实执行路径产生并经工具回喂可解释，附出处",
           "title": "G8/G9：限额停止状态由真实执行路径产生并经工具回喂可解释，附出处",
@@ -3301,14 +3301,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "G9 子助手没有核心工具或 Leader 反思指引，错误回喂后继续",
           "title": "G9 子助手没有核心工具或 Leader 反思指引，错误回喂后继续",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryExecution.test.ts",
           "template": "G8/G9：限额停止状态由真实执行路径产生并经工具回喂可解释，附出处",
           "title": "G8/G9：限额停止状态由真实执行路径产生并经工具回喂可解释，附出处",
@@ -3327,7 +3327,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/sessionsHistoryParams.test.ts",
           "template": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
           "title": "C14/P1/M2/G10：字段白名单不含身份、SQL、shell 或数据库路径",
@@ -3350,14 +3350,14 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflections.test.ts",
           "template": "RF01：仅 Leader 可调；子助手拒绝；schema 拒绝身份覆盖字段",
           "title": "RF01：仅 Leader 可调；子助手拒绝；schema 拒绝身份覆盖字段",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF01：非 Leader 角色拒绝记录检索；schema 拒绝身份覆盖字段",
           "title": "RF01：非 Leader 角色拒绝记录检索；schema 拒绝身份覆盖字段",
@@ -3384,21 +3384,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF02：无 query 目录；NFKC/英文小写；空白切词 AND；category 与 scope 精确交集",
           "title": "RF02：无 query 目录；NFKC/英文小写；空白切词 AND；category 与 scope 精确交集",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF02：query 1–256 码点；空白 query 明确报参数错误",
           "title": "RF02：query 1–256 码点；空白 query 明确报参数错误",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF02/RF16：确定性页序 updatedAt desc + id asc；20/50 条页；游标续读固定快照",
           "title": "RF02/RF16：确定性页序 updatedAt desc + id asc；20/50 条页；游标续读固定快照",
@@ -3417,21 +3417,32 @@
         {
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放"
+        },
+        {
+          "file": "frontend/src/components/chat/reflectionBlock.test.ts",
+          "title": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash"
         }
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflections.test.ts",
           "template": "RF03 recordTurn 接缝：在飞证据落行后转 valid、草稿转 pending；ack 前不可用",
           "title": "RF03 recordTurn 接缝：在飞证据落行后转 valid、草稿转 pending；ack 前不可用",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
+          "status": "passed"
+        },
+        {
+          "reportSha256": "9251e952f74555f27195f8ee3877638d3b64a89d3a5372b9363f1b639d3a27f0",
+          "file": "frontend/src/components/chat/reflectionBlock.test.ts",
+          "template": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash",
+          "title": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash",
           "status": "passed"
         }
       ],
@@ -3447,21 +3458,32 @@
         {
           "file": "frontend/src/components/chat/reflectionBlock.test.ts",
           "title": "RF04 渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack"
+        },
+        {
+          "file": "frontend/src/components/chat/reflectionBlock.test.ts",
+          "title": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash"
         }
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "status": "passed"
         },
         {
-          "reportSha256": "3b6c67a076e45d5faffdceedf36dc8f36a2bbc9adc4024c3f52c9ce64ed81c82",
+          "reportSha256": "9251e952f74555f27195f8ee3877638d3b64a89d3a5372b9363f1b639d3a27f0",
           "file": "frontend/src/components/chat/reflectionBlock.test.ts",
           "template": "RF04 渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack",
           "title": "RF04 渲染完整五部分（超过 4KiB 也全文展示）并在渲染后提交 ack",
+          "status": "passed"
+        },
+        {
+          "reportSha256": "9251e952f74555f27195f8ee3877638d3b64a89d3a5372b9363f1b639d3a27f0",
+          "file": "frontend/src/components/chat/reflectionBlock.test.ts",
+          "template": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash",
+          "title": "RF03/RF04 同轮证据落库后以服务端最新hash回执，不使用冻结工具引用的旧hash",
           "status": "passed"
         }
       ],
@@ -3477,7 +3499,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
@@ -3496,7 +3518,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsConfirm.test.ts",
           "template": "RF06 模型伪造 approved/grantToken 等字段被 schema 拒绝",
           "title": "RF06 模型伪造 approved/grantToken 等字段被 schema 拒绝",
@@ -3539,49 +3561,49 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF10 两会话同基准修订：后提交者整体冲突，旧确认不改写新版本",
           "title": "RF07/RF10 两会话同基准修订：后提交者整体冲突，旧确认不改写新版本",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF13 事务前真实连接屏障：授权后来源变化不保存",
           "title": "RF07/RF13 事务前真实连接屏障：授权后来源变化不保存",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07 授权后墓碑 generation 变化或目标删除，旧确认不能复活记录",
           "title": "RF07 授权后墓碑 generation 变化或目标删除，旧确认不能复活记录",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07 修订未提交草稿后，旧版来源变化不误撤新版确认授权",
           "title": "RF07 修订未提交草稿后，旧版来源变化不误撤新版确认授权",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF14 硬删阻止两会话旧草稿、旧保存幂等和迟到确认复活，展示回放只有占位",
           "title": "RF07/RF14 硬删阻止两会话旧草稿、旧保存幂等和迟到确认复活，展示回放只有占位",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文",
           "title": "RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07 停用再恢复仍改变 generation，旧 active 基准不能在状态绕回后生效",
           "title": "RF07 停用再恢复仍改变 generation，旧 active 基准不能在状态绕回后生效",
@@ -3600,7 +3622,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsConfirm.test.ts",
           "template": "RF08 commit成功结果未知，真实新进程重试只返回原记录",
           "title": "RF08 commit成功结果未知，真实新进程重试只返回原记录",
@@ -3627,21 +3649,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "title": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF23 无新教训只解释范围并推进任务，不产生草稿",
           "title": "RF09/RF23 无新教训只解释范围并推进任务，不产生草稿",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF22 证据不足/历史注入不能自证，拒绝后图继续",
           "title": "RF09/RF22 证据不足/历史注入不能自证，拒绝后图继续",
@@ -3684,49 +3706,49 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 修订正式记录：同 record 新 revision，元数据也须完整展示确认",
           "title": "RF10 修订正式记录：同 record 新 revision，元数据也须完整展示确认",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 合并作为一个确认动作：来源去重，保留关系，源记录退出主动使用",
           "title": "RF10 合并作为一个确认动作：来源去重，保留关系，源记录退出主动使用",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF10 两会话同基准修订：后提交者整体冲突，旧确认不改写新版本",
           "title": "RF07/RF10 两会话同基准修订：后提交者整体冲突，旧确认不改写新版本",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 合并中一源变化：所有源保持原状，不留下半个新记录",
           "title": "RF10 合并中一源变化：所有源保持原状，不留下半个新记录",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 原始来源重复去重但合并保留每条来源关系",
           "title": "RF10 原始来源重复去重但合并保留每条来源关系",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 已替代的源不能重新作为替代目标形成环；merge 最多 8 个目标",
           "title": "RF10 已替代的源不能重新作为替代目标形成环；merge 最多 8 个目标",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF10 合并继承来源后超过8证据或整体32KiB，拒绝且不改变源记录",
           "title": "RF10 合并继承来源后超过8证据或整体32KiB，拒绝且不改变源记录",
@@ -3765,42 +3787,42 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF11 停用/恢复沿用完整展示确认，恢复待复核记录不洗白证据",
           "title": "RF11 停用/恢复沿用完整展示确认，恢复待复核记录不洗白证据",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF11：experience 只返回 active+valid 正式记录；草稿/停用/替代/待复核不进入",
           "title": "RF11：experience 只返回 active+valid 正式记录；草稿/停用/替代/待复核不进入",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF11/RF21：read 按输入顺序给完整性、出处与 body_ref；版本冲突与不存在安全同形",
           "title": "RF11/RF21：read 按输入顺序给完整性、出处与 body_ref；版本冲突与不存在安全同形",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF11：read 不泄露不可主动使用的记录正文；management 才可读取状态",
           "title": "RF11：read 不泄露不可主动使用的记录正文；management 才可读取状态",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF11：management 需可信管理意图；仅本人；草稿单独 state",
           "title": "RF11：management 需可信管理意图；仅本人；草稿单独 state",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF11/G8 旧经验冲突时读管理版本，不把失效经验作为主动依据",
           "title": "RF11/G8 旧经验冲突时读管理版本，不把失效经验作为主动依据",
@@ -3819,7 +3841,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
@@ -3846,21 +3868,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF13 待复核经验不能合并洗白；剩余/补充原始证据重新确认才恢复 valid",
           "title": "RF13 待复核经验不能合并洗白；剩余/补充原始证据重新确认才恢复 valid",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF13 事务前真实连接屏障：授权后来源变化不保存",
           "title": "RF07/RF13 事务前真实连接屏障：授权后来源变化不保存",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF13 修改未提交合并草稿仍保留全部根证据，源变化继续使结果失效",
           "title": "RF13 修改未提交合并草稿仍保留全部根证据，源变化继续使结果失效",
@@ -3899,42 +3921,42 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionDereference.test.ts",
           "template": "RF14 已删除反思工具输入只在本次模型入参脱敏，不改原图消息",
           "title": "RF14 已删除反思工具输入只在本次模型入参脱敏，不改原图消息",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF14 首个工具结果落盘前关闭草稿，迟到快照/待写不能恢复输入；原生bytes与普通文本保留",
           "title": "RF14 首个工具结果落盘前关闭草稿，迟到快照/待写不能恢复输入；原生bytes与普通文本保留",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF14 硬删阻止两会话旧草稿、旧保存幂等和迟到确认复活，展示回放只有占位",
           "title": "RF07/RF14 硬删阻止两会话旧草稿、旧保存幂等和迟到确认复活，展示回放只有占位",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文",
           "title": "RF07/RF14 独立连接删除与保存竞态：硬删提交后，延迟保存不能写回正文",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF14/RF15 幂等30天过期后仍能清初始草稿，独立合并派生记录保留",
           "title": "RF14/RF15 幂等30天过期后仍能清初始草稿，独立合并派生记录保留",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF14 来源失效后硬删同步清专属 outbox；共享来源的独立记录清理仍可重放",
           "title": "RF14 来源失效后硬删同步清专属 outbox；共享来源的独立记录清理仍可重放",
@@ -3965,28 +3987,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF15 注入时钟的启动清理清除30天未确认草稿/展示，过期授权不重签",
           "title": "RF15 注入时钟的启动清理清除30天未确认草稿/展示，过期授权不重签",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF15 每用户100活跃及滚动24小时100新建，撤回清副本也不重置新建额度",
           "title": "RF15 每用户100活跃及滚动24小时100新建，撤回清副本也不重置新建额度",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF14/RF15 幂等30天过期后仍能清初始草稿，独立合并派生记录保留",
           "title": "RF14/RF15 幂等30天过期后仍能清初始草稿，独立合并派生记录保留",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF15 操作日志保留90天，账号删除清墓碑与清理队列且不产生孤儿副本",
           "title": "RF15 操作日志保留90天，账号删除清墓碑与清理队列且不产生孤儿副本",
@@ -4025,42 +4047,42 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF02/RF16：确定性页序 updatedAt desc + id asc；20/50 条页；游标续读固定快照",
           "title": "RF02/RF16：确定性页序 updatedAt desc + id asc；20/50 条页；游标续读固定快照",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16：游标绑定 owner/purpose/条件；过期后 cursor_stale；重启旧游标失效",
           "title": "RF16：游标绑定 owner/purpose/条件；过期后 cursor_stale；重启旧游标失效",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16：快照内记录内容/证据版本变化 → cursor_stale 并指引重查，不混新旧结果",
           "title": "RF16：快照内记录内容/证据版本变化 → cursor_stale 并指引重查，不混新旧结果",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16：续读不延长游标绝对到期",
           "title": "RF16：续读不延长游标绝对到期",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16：每用户游标容量 4；超限明确 busy，不裁掉已有游标",
           "title": "RF16：每用户游标容量 4；超限明确 busy，不裁掉已有游标",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16/RF17：真实执行器硬终止后续查询可复用；取消路径实际终止",
           "title": "RF16/RF17：真实执行器硬终止后续查询可复用；取消路径实际终止",
@@ -4091,28 +4113,28 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF17：每主请求独立额度（次数/字节/等待）；超限 stopped；缺可信请求身份停止",
           "title": "RF17：每主请求独立额度（次数/字节/等待）；超限 stopped；缺可信请求身份停止",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF17：单次字节上限不足时明确 partial/stopped，不报空结果",
           "title": "RF17：单次字节上限不足时明确 partial/stopped，不报空结果",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF17：查询执行槽每用户 1、全局 4；满额立即 busy；取消真实释放",
           "title": "RF17：查询执行槽每用户 1、全局 4；满额立即 busy；取消真实释放",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF16/RF17：真实执行器硬终止后续查询可复用；取消路径实际终止",
           "title": "RF16/RF17：真实执行器硬终止后续查询可复用；取消路径实际终止",
@@ -4131,7 +4153,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsConfirm.test.ts",
           "template": "RF18 正式提交事件写失败 → 整笔回滚；随后正常重试可保存",
           "title": "RF18 正式提交事件写失败 → 整笔回滚；随后正常重试可保存",
@@ -4150,7 +4172,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF19 episode 元数据故障实际停止增强，原任务照常完成",
           "title": "RF19 episode 元数据故障实际停止增强，原任务照常完成",
@@ -4169,7 +4191,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRecovery.test.ts",
           "template": "RF20 旧备份恢复必须重放完整同源安全日志；缺失封锁正文、工具和确认",
           "title": "RF20 旧备份恢复必须重放完整同源安全日志；缺失封锁正文、工具和确认",
@@ -4188,7 +4210,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsRetrieval.test.ts",
           "template": "RF11/RF21：read 按输入顺序给完整性、出处与 body_ref；版本冲突与不存在安全同形",
           "title": "RF11/RF21：read 按输入顺序给完整性、出处与 body_ref；版本冲突与不存在安全同形",
@@ -4207,7 +4229,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF22 证据不足/历史注入不能自证，拒绝后图继续",
           "title": "RF09/RF22 证据不足/历史注入不能自证，拒绝后图继续",
@@ -4234,21 +4256,21 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/reflectionsMutations.test.ts",
           "template": "RF23 同主请求同 episode 经 runtime 重建仍只产生一个草稿；新证据可再分析",
           "title": "RF23 同主请求同 episode 经 runtime 重建仍只产生一个草稿；新证据可再分析",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "title": "RF09/RF23/G7 失败→历史 search/read→有证据草稿/present→等待确认仍继续原任务",
           "status": "passed"
         },
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF09/RF23 无新教训只解释范围并推进任务，不产生草稿",
           "title": "RF09/RF23 无新教训只解释范围并推进任务，不产生草稿",
@@ -4267,7 +4289,7 @@
       ],
       "evidence": [
         {
-          "reportSha256": "6ad7759d644cdffc3863e75f77324be683012c5ccf7e2a227300e6e2fd70d020",
+          "reportSha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
           "file": "server/test/runnerReflectionAnalysis.test.ts",
           "template": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
           "title": "RF24/RF03/RF04/RF05/RF12 历史失败→全文→确认→跨会话复用→修订合并→失效→硬删回放",
