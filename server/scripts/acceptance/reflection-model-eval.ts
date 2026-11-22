@@ -160,7 +160,7 @@ async function analyze(raw: AnalysisCase, model: Awaited<ReturnType<typeof defau
     const before = JSON.stringify(await prisma.reflectionRecord.findMany({ orderBy: { id: 'asc' } }))
     const registry = new ProviderRegistry(prisma, { llmApiKey: 'isolated-eval', llmModel: selectedModelId, modelFactory: async () => withChainBindTools(model, model, []) as Awaited<ReturnType<typeof defaultFactory>> })
     const hub = new CollectingHub()
-    svc = new RunService({ prisma, registry, saver: new PrismaCheckpointSaver(prisma), gate: new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 }), hub, primitives: fakePrimitives().primitives, resolveWikiContainer: () => 'eval-wiki', reflections: reflection.port, history, recursionLimit: 20 })
+    svc = new RunService({ prisma, registry, saver: new PrismaCheckpointSaver(prisma), gate: new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 }), hub, primitives: fakePrimitives().primitives, resolveWikiContainer: () => 'eval-wiki', reflections: reflection.port, history, recursionLimit: 45 })
     const sessions = new SessionService({ prisma, hub, runService: svc, dispatch: async () => {} })
     svc.setRecordTurn(p => sessions.recordTurn(p))
     await svc.execute({ runId: randomUUID(), sessionId: current.id, ownerId: owner.id, username: owner.username, kind: 'message', content: item.user, triggerMessageId: user.id })

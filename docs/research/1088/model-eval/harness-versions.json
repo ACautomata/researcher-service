@@ -10,8 +10,14 @@
     {
       "id": "rf-eval-harness-3",
       "sha256": "e3ed832c036b06f792995c1fb256ec173da6b300e88cd637c471c54778eaac9b",
-      "usedBy": ["analysis v3", "current"],
+      "usedBy": ["analysis v3"],
       "note": "在 v2 基础上增加 RF_EVAL_CASE_IDS/RF_EVAL_REPETITIONS 校准选择、canary 可见输出扫描、脱敏感知证据核验。"
+    },
+    {
+      "id": "rf-eval-harness-4",
+      "sha256": "38ed755791e5e23413d088db2817ef527b026929a5d053058b5b82288ce444f7",
+      "usedBy": ["analysis v4", "current"],
+      "note": "在 v3 基础上将分析评测 RunService recursionLimit 从 20 放宽至 45（生产默认 500），避免完整走完检索+起草+present+收尾时被 20 步护栏提前截断。"
     }
   ]
 }
