@@ -1,0 +1,7 @@
+{
+  "passed": false,
+  "rate": 0.8333333333333334,
+  "reasons": [
+    "confirmation:quality_threshold"
+  ]
+}

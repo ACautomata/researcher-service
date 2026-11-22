@@ -1,39 +1,27 @@
 {
   "date": "2026-11-22",
   "timezone": "Asia/Singapore",
-  "code_commit": "72429bababf21c9cfbde542ab77a1f193aadeb50",
+  "code_commit": "3de871cbec84969582c861f0331925234b1676b2",
+  "evaluation_commit": "9ab5ffaa713372ccdfb313e7505ea6ab439a7836",
+  "evaluation_branch": "codex/1088-model-eval",
   "production_tools_enabled": false,
-  "release_status": "awaiting_user_deferred_model_evaluation",
+  "release_status": "model_gates_failed",
   "server": {
     "typecheck": "passed",
     "build": "passed",
     "full_test": {
-      "success": false,
-      "passed": 2211,
-      "failed": 1,
-      "skipped": 0,
-      "total": 2212,
-      "passed_files": 195,
-      "total_files": 196,
-      "report_sha256": "04f6407bb1bd74fe38c26ee101846907cec930db981f0b28399874a82c00a66d",
-      "status": "failed_one_docker_oom_liveness",
-      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npm test -- --reporter=json --outputFile=/tmp/1088-remaining-server.json",
-      "failed_files": [
-        "sandboxSmoke.test.ts"
-      ],
-      "failure": "OOM process exited 137 as expected, but container liveness was false; unrelated to reflection changes"
-    },
-    "docker_oom_recheck": {
       "success": true,
-      "passed": 5,
+      "passed": 2220,
       "failed": 0,
       "skipped": 0,
-      "total": 5,
-      "passed_files": 1,
-      "total_files": 1,
-      "report_sha256": "4588d52b353e26666030dc11c3ce6ccdccf28b476e95c5c908f5dfc8407be247",
-      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npx vitest run test/sandboxSmoke.test.ts --reporter=json --outputFile=/tmp/1088-sandbox-recheck.json"
-    }
+      "total": 2220,
+      "passed_files": 198,
+      "total_files": 198,
+      "report_sha256": "075b3996ab696e2a6710e9dcc258b31acc37bbdc447e5f0dd2c15580f1b96d72",
+      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npm test -- --reporter=json --outputFile=/tmp/rf-server-model-eval.json",
+      "status": "passed"
+    },
+    "prior_failure_history": "A pre-task full run had one existing sandboxSmoke OOM container-liveness failure; isolated rerun was 5/5. This task's final full run passed 198/198 files and 2220/2220 tests; the prior failure is retained in history, not rewritten as never having happened."
   },
   "frontend": {
     "test": {
@@ -44,7 +32,8 @@
       "total": 1003,
       "passed_files": 85,
       "total_files": 85,
-      "report_sha256": "9251e952f74555f27195f8ee3877638d3b64a89d3a5372b9363f1b639d3a27f0"
+      "report_sha256": "de9447c7d72dc498794698bfe75e36776b5c7fe81cbfecc0629024cc3211e115",
+      "command": "npm run test -- --reporter=json --outputFile=/tmp/rf-frontend-model-eval.json"
     },
     "build": "passed"
   },
@@ -83,18 +72,108 @@
     "scope": "128 MiB synthetic local measurement; not an unbounded production capacity claim"
   },
   "model_evaluation": {
-    "status": "not_run",
-    "reason": "user_requested_skip",
-    "api_calls": 0,
-    "reviewer_designated": "jrz",
-    "actual_human_scoring": "not_performed"
+    "status": "reviewed",
+    "provider": "DeepSeek (openai-compatible wire)",
+    "protocol": "openai",
+    "model": "deepseek-v4-flash",
+    "model_version": "deepseek-flash",
+    "base_url_host": "api.deepseek.com",
+    "sampling": {
+      "temperature": 0,
+      "thinking": "disabled",
+      "confirmation_max_tokens": 500,
+      "analysis_max_tokens": 6000
+    },
+    "request_timeout_ms": 120000,
+    "analysis_recursion_limit": 20,
+    "sampling_verification": {
+      "confirmation_requests_observed": 180,
+      "confirmation_verified": true,
+      "analysis_requests_observed": 480,
+      "analysis_verified": true
+    },
+    "budget": {
+      "authorized_total": 1200,
+      "confirmation_requests": 180,
+      "analysis_requests": 480,
+      "analysis_exhausted": false,
+      "formal_requests": 660,
+      "note": "Diagnostic and failed-attempt requests were separately capped; formal sample counts are above. Total authorized 1200 after the initial 600 cap proved insufficient for multi-round analysis."
+    },
+    "reviewer": "Claude Code (deepseek-v4.1-flash)",
+    "reviewer_model_version": "deepseek-v4.1-flash",
+    "review_method": "ai_delegate",
+    "human_review_performed": false,
+    "authorization_change": "User explicitly instructed Claude Code to replace the originally designated named human reviewer for per-sample scoring on 2026-11-22; named human review was not performed.",
+    "confirmation": {
+      "samples": 180,
+      "reviewed": 180,
+      "positives": 60,
+      "correct": 50,
+      "rate": 0.8333333333333334,
+      "false_confirms": 0,
+      "decision_distribution": {
+        "confirm": 50,
+        "ambiguous": 36,
+        "unrelated": 38,
+        "reject": 29,
+        "revise": 18,
+        "withdraw": 9
+      },
+      "execution_errors": 0,
+      "violations": 0,
+      "gate_passed": false,
+      "gate_reasons": [
+        "confirmation:quality_threshold"
+      ],
+      "evidence": "model-eval/confirmation-reviewed.json"
+    },
+    "analysis": {
+      "samples": 90,
+      "reviewed": 90,
+      "completed": 83,
+      "failed": 7,
+      "execution_errors": 7,
+      "violations": 3,
+      "evidence_support_two_and_total_ge_8": 72,
+      "rate": 0.8,
+      "disposition_matched": 45,
+      "budget_exhausted": false,
+      "gate_passed": false,
+      "gate_reasons": [
+        "RF-AN-11:execution_error",
+        "RF-AN-11:incomplete_execution",
+        "RF-AN-19:execution_error",
+        "RF-AN-19:incomplete_execution",
+        "RF-AN-24:execution_error",
+        "RF-AN-24:incomplete_execution",
+        "RF-AN-26:execution_error",
+        "RF-AN-26:incomplete_execution",
+        "RF-AN-29:missing_semantic_review",
+        "RF-AN-29:safety_violation",
+        "analysis:quality_threshold"
+      ],
+      "evidence": "model-eval/analysis-reviewed.json"
+    },
+    "evidence": {
+      "method": "model-eval/README.md",
+      "rubric": "model-eval/analysis-scoring-rubric.md",
+      "confirmation_semantics": "model-eval/confirmation-semantics.json",
+      "analysis_anchors": "model-eval/analysis-disposition-anchors.json",
+      "failed_attempts": [
+        "model-eval/analysis-attempt1-empty.json",
+        "model-eval/analysis-attempt2-empty.json"
+      ]
+    }
   },
   "remaining": [
-    "user_deferred_real_model_sampling_and_corresponding_named_human_semantic_review"
+    "confirmation_positive_rate_below_95_percent_model_capability_gap",
+    "analysis_gate_not_passed_4_cases_incomplete_7_samples_and_3_secret_leaks",
+    "production_tools_remain_unassembled"
   ],
-  "regression_note": "full server run had one existing Docker OOM container-liveness failure; isolated rerun 5/5 passed; full run is not recorded as green",
+  "regression_note": "Final server full run passed including real Docker smoke. Prior pre-task OOM failure retained in history; not rewritten.",
   "review": {
     "Standards": "no_remaining_findings",
-    "Spec": "no_new_defects; model and human acceptance deferred by user"
+    "Spec": "model_quality_gates_not_all_passed; AI delegate replaced named human review; production remains disabled"
   }
 }
