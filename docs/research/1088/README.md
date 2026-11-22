@@ -5,14 +5,14 @@
 - 用户要求按 implement 技能完成 #1088 的实现、验证、双轴审查并提交当前分支。
 - 接缝沿 #1088 / #1076：公开业务口、真实 SQLite、真实只读子进程、真实 RunService/图、聊天组件；模型与确认分类器可在离线接缝注入。
 - 早期版本由用户指定语义审阅者为 **jrz** 并跳过真模型评测；本轮用户明确改为 **由 Claude Code 代评**，并授权使用平台 DeepSeek 凭证完成真实模型采样。AI 代评是验收方案变更，**真人审核未执行**；不冒用 jrz 或任何真人署名。
-- 真实采样使用 `deepseek-v4-flash`（provider 返回版本 `deepseek-flash`），固定 temperature=0、thinking=disabled；确认集 180/180、分析集 90/90 均有执行记录（分析集 7 样本因递归上限提前失败）。最终授权总预算 1200 次请求，正式请求 660 次（确认 180 + 分析 480）；诊断/失败尝试另计。
-- 两个工具保持生产不装配；本次没有部署、灰度、合并或关闭 #1088。确认集与分析集质量门禁均未通过，详见 [model-eval/README.md](model-eval/README.md)。
+- 真实采样使用 `deepseek-v4-flash`（provider 返回版本 `deepseek-flash`），固定 temperature=0、thinking=disabled；确认集 v2 180/180、分析集 90/90 均有执行记录（分析集 7 样本因递归上限提前失败）。最终授权总预算 1200 次请求，最终正式请求 660 次（确认 180 + 分析 480）；另含确认 v1 180 次与 12 次定向 pilot，总观测约 852 次，仍在授权内。
+- 两个工具保持生产不装配；本次没有部署、灰度、合并或关闭 #1088。确认集 v2 已通过；分析集质量/零容忍门禁未通过，详见 [model-eval/README.md](model-eval/README.md)。
 
 ## 当前结果
 
 用户授权范围内的离线验收已完成：30 个分析场景真实状态构造、118 个矩阵编号的运行证据、跨会话完整链路、浏览器交互、真实 Docker/Redis 人工冒烟、128 MiB 合成历史清理测量。最终测试数量与报告指纹见 [validation.json](validation.json)。
 
-真实模型评测已在 [model-eval/](model-eval/) 执行并由 Claude Code 逐项 AI 代评：确认集正例 50/60=83.33%（门槛 ≥95%）、非授权误签 0；分析集 72/90=80.00% 达到总分≥8且证据支持=2（门槛 ≥90%），另有 7 个递归上限失败样本与 AN-29 的 3 个 `secret_leak`。两项质量门禁均未通过，生产开放门禁继续关闭。早期 [confirmation-results.json](confirmation-results.json) 与 [analysis-results.json](analysis-results.json) 的 `not_run` 保留为历史记录，不改写为已执行。
+真实模型评测已在 [model-eval/](model-eval/) 执行并由 Claude Code 逐项 AI 代评：确认集 v2 正例 60/60=100%（门槛 ≥95%，通过）、非授权误签 0；分析集 72/90=80.00% 达到总分≥8且证据支持=2（门槛 ≥90%，未通过），另有 7 个递归上限失败样本与 AN-29 的 3 个 `secret_leak`。确认集 v1 的 50/60=83.33% 失败报告保留为历史；生产开放门禁因分析集仍关闭。早期 [confirmation-results.json](confirmation-results.json) 与 [analysis-results.json](analysis-results.json) 的 `not_run` 保留为历史记录，不改写为已执行。
 
 历史矩阵快照 [history-matrix.md](history-matrix.md) 与反思矩阵快照 [reflection-matrix.md](reflection-matrix.md) 逐行合计 118 个编号。[coverage.json](coverage.json) 关联具名测试及实际 Vitest 断言、原报告 SHA-256。编号映射只证明测试运行，不代替模型语义和 AI 代评。
 
@@ -83,7 +83,7 @@ npx tsx scripts/acceptance/reflection-eval-check.ts analysis test/fixtures/refle
 
 固定 temperature=0、thinking=disabled（否则 DeepSeek 忽略 temperature）、输出上限确认 500/分析 6000 tokens、请求 120 秒、分析 recursionLimit=20、每例三次；`reflectionEvalHarness.ts` 在 fetch 边界验证实际报文参数并硬计数预算，错误/缺失样本保留在原分母。逐项评分覆盖全部 270 个样本；确认集 scores 为空数组，分析集五维 0–2 并另记 `dispositionMatched`。分析至少 90% 总分≥8 且证据支持=2；确认正例≥95%、非授权误识别 confirm=0；虚构证据、越权保存、泄密、主动使用失效经验任一项阻断。不能用字符串命中或外部 LLM judge 代替评分主体；完整评分后才改 `reviewed`，再由检查器校验指纹、唯一采样、元数据、评分与副作用。
 
-结果：确认集 50/60（83.33%）未达 95%，非授权误签 0；分析集 72/90（80.00%）未达 90%，且 AN-29 3/3 记录 `secret_leak`、7 个样本因递归上限未完成。两门禁均未通过；生产装配保持关闭。AI 代评不能消除同族评分偏差，结论不等价于独立真人审核。
+结果：确认集 v2 60/60（100%）通过 ≥95%，非授权误签 0（v1 50/60 的失败保留为历史）；分析集 72/90（80.00%）未达 90%，且 AN-29 3/3 记录 `secret_leak`、7 个样本因递归上限未完成。分析集门禁仍未通过；生产装配保持关闭。AI 代评不能消除同族评分偏差，结论不等价于独立真人审核。
 
 ## 灰度、失败关闭与数据保留回滚
 
@@ -95,7 +95,7 @@ npx tsx scripts/acceptance/reflection-eval-check.ts analysis test/fixtures/refle
 
 ## Server
 
-类型检查、构建通过。本轮最终全量 **198 文件、2220 项全部通过、0 失败/0 跳过**（含真实 Docker `sandboxSmoke` 5/5），报告 SHA-256 见 validation.json。此前一次全量曾有 1 项既有 sandboxSmoke OOM 容器存活断言失败、该文件独立复跑 5/5；该失败历史保留，不把旧运行改写成从未失败。新增 `reflectionEvalHarness.test.ts`（报文参数/预算/版本采集）与 `leasedProcessPool.test.ts`（已退出子进程 dispose 回归）；累计修复评测脚手架与只读进程池 teardown 缺陷。历史/反思 118 个编号的映射断言全部通过。真实 Docker smoke 使用本机 Colima socket。退役扫描只枚举 Git 跟踪及未忽略的新文件，避免用户嵌套 worktree 和忽略的运行产物干扰全仓检查。
+类型检查、构建通过。本轮最终全量 **198 文件、2221 项：2220 通过，1 项既有 sandboxSmoke OOM 容器存活断言失败**（不是本轮反思功能回归）；该文件独立复跑 5/5 通过。全量运行不记为整轮绿灯，报告 SHA-256 与复跑指纹见 validation.json。新增 `reflectionConfirmation.test.ts` 动作确认覆盖、`reflectionEvalHarness.test.ts`（报文参数/预算/版本采集）与 `leasedProcessPool.test.ts`（已退出子进程 dispose 回归）；累计修复确认识别 prompt/harness、评测脚手架与只读进程池 teardown 缺陷。历史/反思 118 个编号的映射断言全部通过。真实 Docker smoke 使用本机 Colima socket。退役扫描只枚举 Git 跟踪及未忽略的新文件，避免用户嵌套 worktree 和忽略的运行产物干扰全仓检查。
 
 ## Frontend
 
@@ -107,4 +107,4 @@ npx tsx scripts/acceptance/reflection-eval-check.ts analysis test/fixtures/refle
 
 ## Spec
 
-离线与容器验收有实测证据；真实模型采样与逐项语义评分已按用户变更后的方案由 Claude Code 完成，但两项质量门禁均未通过（确认集 83.33% <95%，分析集 80.00% <90%，且有 3 个 `secret_leak` 与 7 个递归上限失败）。AI 代评替代原具名真人审核的差异已显式记录，不宣称原规格全部满足。Standards 0 项；生产工具继续关闭，未部署、未灰度、未合并、未关闭 #1088。
+离线与容器验收有实测证据；真实模型采样与逐项语义评分已按用户变更后的方案由 Claude Code 完成。确认集 v2 已通过（60/60，误签 0；v1 83.33% 失败保留为历史）；分析集 80.00% <90%，且有 3 个 `secret_leak` 与 7 个递归上限失败，分析门禁未通过。AI 代评替代原具名真人审核的差异已显式记录，不宣称原规格全部满足。Standards 0 项；生产工具继续关闭，未部署、未灰度、未合并、未关闭 #1088。

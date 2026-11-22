@@ -1,27 +1,38 @@
 {
   "date": "2026-11-22",
   "timezone": "Asia/Singapore",
-  "code_commit": "3de871cbec84969582c861f0331925234b1676b2",
-  "evaluation_commit": "9ab5ffaa713372ccdfb313e7505ea6ab439a7836",
+  "code_commit": "71e6889cba70bd0aae36c0e35e2ee3cebb9cf2a1",
+  "evaluation_commit": "74a788c78d84c6b97e868fc268c9f341e006dd95",
   "evaluation_branch": "codex/1088-model-eval",
   "production_tools_enabled": false,
-  "release_status": "model_gates_failed",
+  "release_status": "model_analysis_gate_failed",
   "server": {
     "typecheck": "passed",
     "build": "passed",
     "full_test": {
-      "success": true,
+      "success": false,
       "passed": 2220,
-      "failed": 0,
+      "failed": 1,
       "skipped": 0,
-      "total": 2220,
-      "passed_files": 198,
+      "total": 2221,
+      "passed_files": 197,
       "total_files": 198,
-      "report_sha256": "075b3996ab696e2a6710e9dcc258b31acc37bbdc447e5f0dd2c15580f1b96d72",
-      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npm test -- --reporter=json --outputFile=/tmp/rf-server-model-eval.json",
-      "status": "passed"
+      "failed_files": [
+        "/Users/jrz/Documents/researcher-service/server/test/sandboxSmoke.test.ts"
+      ],
+      "report_sha256": "463cbdd48965f76c9a9eaa656b53c51fca20d475074d08c994ac83126f3f1f63",
+      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npm test -- --reporter=json --outputFile=/tmp/rf-server-model-eval-v2.json",
+      "status": "failed_one_docker_oom_liveness"
     },
-    "prior_failure_history": "A pre-task full run had one existing sandboxSmoke OOM container-liveness failure; isolated rerun was 5/5. This task's final full run passed 198/198 files and 2220/2220 tests; the prior failure is retained in history, not rewritten as never having happened."
+    "sandbox_oom_recheck": {
+      "success": true,
+      "passed": 5,
+      "failed": 0,
+      "total": 5,
+      "report_sha256": "e5fc4f32c0cf2ae4450ccac2eb0d71a6433ba3ce2843fe7f552665823c027ef5",
+      "command": "DOCKER_HOST=unix:///Users/jrz/.colima/default/docker.sock npx vitest run test/sandboxSmoke.test.ts --reporter=json --outputFile=/tmp/rf-sandbox-v2.json"
+    },
+    "prior_failure_history": "The final full run has the same existing sandboxSmoke OOM container-liveness failure (2220/2221); the file passed 5/5 in isolation. This is recorded as not green, not rewritten as a previous-only issue."
   },
   "frontend": {
     "test": {
@@ -78,6 +89,11 @@
     "model": "deepseek-v4-flash",
     "model_version": "deepseek-flash",
     "base_url_host": "api.deepseek.com",
+    "prompt_version": "rf-confirmation-1088-v2",
+    "harness_sha256": "8292d629e2eafc15ca0984c7eb2b86fc77f0d325051c21cc77a936bd5d12b8a5",
+    "confirmation_context": [
+      "请先完整展示草稿。"
+    ],
     "sampling": {
       "temperature": 0,
       "thinking": "disabled",
@@ -94,11 +110,14 @@
     },
     "budget": {
       "authorized_total": 1200,
-      "confirmation_requests": 180,
+      "final_confirmation_requests": 180,
+      "prior_confirmation_v1_requests": 180,
+      "pilot_requests": 12,
       "analysis_requests": 480,
       "analysis_exhausted": false,
-      "formal_requests": 660,
-      "note": "Diagnostic and failed-attempt requests were separately capped; formal sample counts are above. Total authorized 1200 after the initial 600 cap proved insufficient for multi-round analysis."
+      "final_formal_requests": 660,
+      "total_observed_estimate": 852,
+      "note": "Final formal samples are confirmation v2 180 + analysis 480. The v1 confirmation run (180) and 12-sample pilot are retained as failure history/calibration; total observed estimate ~852 of 1200, excluding bounded diagnostics."
     },
     "reviewer": "Claude Code (deepseek-v4.1-flash)",
     "reviewer_model_version": "deepseek-v4.1-flash",
@@ -109,24 +128,32 @@
       "samples": 180,
       "reviewed": 180,
       "positives": 60,
-      "correct": 50,
-      "rate": 0.8333333333333334,
+      "correct": 60,
+      "rate": 1,
       "false_confirms": 0,
       "decision_distribution": {
-        "confirm": 50,
-        "ambiguous": 36,
-        "unrelated": 38,
-        "reject": 29,
-        "revise": 18,
-        "withdraw": 9
+        "confirm": 60,
+        "reject": 24,
+        "withdraw": 9,
+        "revise": 16,
+        "ambiguous": 43,
+        "unrelated": 28
       },
       "execution_errors": 0,
       "violations": 0,
-      "gate_passed": false,
-      "gate_reasons": [
-        "confirmation:quality_threshold"
-      ],
-      "evidence": "model-eval/confirmation-reviewed.json"
+      "gate_passed": true,
+      "gate_reasons": [],
+      "evidence": "model-eval/confirmation-reviewed-v2.json",
+      "gate_evidence": "model-eval/gate-confirmation-v2.json",
+      "history": {
+        "v1": {
+          "rate": 0.8333333333333334,
+          "gate_passed": false,
+          "evidence": "model-eval/confirmation-reviewed.json",
+          "gate_evidence": "model-eval/gate-confirmation.json",
+          "note": "fixed contradictory previous context and save-only prompt; preserved as failure history"
+        }
+      }
     },
     "analysis": {
       "samples": 90,
@@ -167,13 +194,13 @@
     }
   },
   "remaining": [
-    "confirmation_positive_rate_below_95_percent_model_capability_gap",
     "analysis_gate_not_passed_4_cases_incomplete_7_samples_and_3_secret_leaks",
+    "server_full_run_has_one_existing_sandboxSmoke_oom_liveness_failure_isolated_5_of_5_passed",
     "production_tools_remain_unassembled"
   ],
-  "regression_note": "Final server full run passed including real Docker smoke. Prior pre-task OOM failure retained in history; not rewritten.",
+  "regression_note": "Final server full run 2220/2221 with the existing sandboxSmoke OOM liveness failure; isolated file 5/5 passed. The full run is not recorded as green.",
   "review": {
     "Standards": "no_remaining_findings",
-    "Spec": "model_quality_gates_not_all_passed; AI delegate replaced named human review; production remains disabled"
+    "Spec": "confirmation v2 passed; analysis quality/zero-tolerance gates not passed; AI delegate replaced named human review; production remains disabled"
   }
 }

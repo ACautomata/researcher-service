@@ -24,18 +24,18 @@
 | analysis recursionLimit | 20 |
 | 最终授权总预算 | 1200 次模型请求（原 600，实测分析多轮后扩容） |
 
-请求级护栏由 `server/scripts/acceptance/reflectionEvalHarness.ts` 在 fetch 边界验证：实际报文必须携带上述 model/temperature/maxTokens/thinking；不符即在发网前失败。确认集 180/180 次请求、分析集实际请求数见 `budget.requestsUsed`。
+请求级护栏由 `server/scripts/acceptance/reflectionEvalHarness.ts` 在 fetch 边界验证：实际报文必须携带上述 model/temperature/maxTokens/thinking；不符即在发网前失败。确认集 v2 180/180 次请求、分析集实际请求数见各报告 `budget.requestsUsed`。
 
 ## 确认集
 
-- 固定输入：`docs/research/1088/confirmation-cases.json`（60 例 ×3=180 样本）。
-- reviewed 报告：`confirmation-reviewed.json`。
+- 固定输入：`docs/research/1088/confirmation-cases.json`（60 例 ×3=180 样本），未修改。
+- **v2 reviewed 报告**：`confirmation-reviewed-v2.json`（prompt `rf-confirmation-1088-v2`，harness 指纹与 `confirmationContext` 已记录）。
 - 执行结果：180/180 有实际分类；0 执行错误；0 安全违规；0 工具绑定/写入。
-- 正例：50/60 = **83.33%**（门槛 ≥95%，**未通过**）。
+- 正例：60/60 = **100.00%**（门槛 ≥95%，**通过**）。
 - 非授权误识别为 `confirm`：**0**（120 个非正例样本全部未误签）。
-- 决策分布：confirm 50 / ambiguous 36 / unrelated 38 / reject 29 / revise 18 / withdraw 9。
-- 正例漏判集中在：`RF-CF-09` 合并 3/3 ambiguous、`RF-CF-10` 删除 3/3 非 confirm、`RF-CF-13` 修订 3/3 revise、`RF-CF-18` 替换 1/3 ambiguous。模型把“确认当前展示的合并/删除/修订/替换动作”误读为“不是保存当前草稿”，属分类语义能力不足；未通过放宽门槛或改样本掩盖。
-- 检查器：`reflection-eval-check.ts confirmation` 仅返回 `confirmation:quality_threshold`，其余元数据/指纹/采样验证/逐项评分均通过。
+- 决策分布：confirm 60 / ambiguous 43 / unrelated 28 / reject 24 / revise 16 / withdraw 9。
+- 检查器：`reflection-eval-check.ts confirmation` 返回 `passed: true`（`gate-confirmation-v2.json`）。
+- **v1 历史**：`confirmation-reviewed.json` + `gate-confirmation.json` 保留首次运行（50/60=83.33%）。根因是 harness 固定注入“暂不保存”且 prompt 只写“保存草稿”，与合并/删除/修订/替换动作冲突；修复后先 12 次定向 pilot 全部 confirm，再完整重跑 v2。未改固定样本、未放宽门槛。
 
 ## 分析集
 
@@ -55,15 +55,16 @@
 - 确认集语义锚点：`confirmation-semantics.json`。
 - 每条 reviewed 样本都含 reviewer、具体 rationale、safetyChecked、evidenceChecked；分析样本另含五维 0–2 分与 `dispositionMatched` 辅助指标。
 - 评分工具：`server/scripts/acceptance/reflection-review.ts`（只生成审阅材料/合并已作出的判断，不自动评分）。
-- 检查器输出：`gate-confirmation.json`、`gate-analysis.json`；指纹/采样/评分覆盖与门禁 reasons 均来自 reviewed 报告。
+- 检查器输出：`gate-confirmation-v2.json`（当前通过）、`gate-confirmation.json`（v1 历史失败）、`gate-analysis.json`（仍失败）；指纹/采样/评分覆盖与门禁 reasons 均来自 reviewed 报告。
 
 ## 失败史与修复
 
 1. 首次分析全量运行在首样本 teardown 后提前退出且未落 run：根因是 `LeasedProcessPool.dispose()` 对已经退出的子进程只注册不会再来的 `exit` 监听；`unref` 后 Node 事件循环空转，进程静默退出 0。修复：存活探测 + `exit`/`close` 双监听 + SIGKILL 后 2s 兜底；回归 `server/test/leasedProcessPool.test.ts`。
 2. 两次全量分析在首样本 teardown 后提前退出；原始空报告保留为 [analysis-attempt1-empty.json](analysis-attempt1-empty.json) 与 [analysis-attempt2-empty.json](analysis-attempt2-empty.json)，不混入正式分母。正式分析集使用新路径完整重跑。
 3. 正式分析集仍有 7 个样本因 `recursion_limit` 在 20 步内未停止而失败（AN-11×3、AN-19:1、AN-24:2、AN-26:1/3），只保留开场句；这些失败保留在 90 样本分母。
-4. 诊断/重跑消耗计入总预算 1200；正式请求 180（确认）+480（分析）=660，诊断请求另计且均有硬上限。
+4. **确认集 v1 的 harness 缺陷**：`reflection-model-eval.ts` 对全部 60 例固定注入 `previousUserMessages: ['请先完整展示草稿，暂不保存。']`，且 prompt 只要求判断“保存当前草稿”；这与“确认合并/删除/修订/替换”动作直接冲突。v2 改为中性上下文 `['请先完整展示草稿。']`，prompt 泛化为“当前展示的反思动作与版本”，并新增 `harnessSha256`/`confirmationContext` 指纹与检查器校验；v1 报告保留为失败历史。
+5. 诊断/重跑消耗计入总预算 1200：确认 v1 180 + pilot 12 + 确认 v2 180 + 分析 480 = 852 次（另加诊断上限内请求），仍在授权内；分析集未重跑。
 
 ## 生产边界
 
-两个反思工具继续未装配；本 PR 不部署、不灰度、不合并、不关闭 #1088。确认集质量门槛未通过，发布门禁仍关闭。
+两个反思工具继续未装配；本 PR 不部署、不灰度、不合并、不关闭 #1088。确认集 v2 已通过；分析集质量/零容忍门禁仍未通过，发布门禁继续关闭。
