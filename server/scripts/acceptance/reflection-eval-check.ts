@@ -22,6 +22,7 @@ const sample = z.object({
 const report = z.object({
   status: z.string(), kind: z.string(), scenarioConstructionComplete: z.boolean(), fixtureSha256: z.string().length(64), promptSha256: z.string().length(64), commit: z.string().length(40),
   promptVersion: z.string().min(1), provider: z.string().min(1), model: z.string().min(1),
+  harnessSha256: z.string().length(64).optional(), confirmationContext: z.array(z.string()).optional(),
   modelVersion: z.string().min(1).nullable().optional(), modelVersions: z.array(z.string()).optional(),
   reviewer: z.string().min(1).nullable().optional(), reviewMethod: z.enum(['human', 'ai_delegate']).optional(),
   reviewerModelVersion: z.string().min(1).nullable().optional(),
@@ -51,6 +52,13 @@ if (!report.success) {
   if (report.data.kind !== kind || report.data.status !== 'reviewed') result.reasons.push('report_not_reviewed_or_wrong_kind')
   if (report.data.status === 'reviewed') {
     // 评分主体与授权变更必须显式记录：AI 代评不得冒用具名真人，也不得省略实际评分模型。
+    if (kind === 'confirmation') {
+      // 确认识别器的固定上下文与采样 harness 也是评测输入；缺指纹/被静默改动即拒绝。
+      const harnessHash = createHash('sha256').update(readFileSync(resolve(__dirname, 'reflection-model-eval.ts'))).digest('hex')
+      if (!report.data.harnessSha256) result.reasons.push('missing_harness_fingerprint')
+      else if (report.data.harnessSha256 !== harnessHash) result.reasons.push('harness_hash_mismatch')
+      if (!report.data.confirmationContext?.length) result.reasons.push('missing_confirmation_context')
+    }
     if (!report.data.reviewer?.trim()) result.reasons.push('missing_reviewer')
     if (!report.data.reviewMethod) result.reasons.push('missing_review_method')
     if (!report.data.reviewerModelVersion?.trim()) result.reasons.push('missing_reviewer_model_version')

@@ -38,6 +38,7 @@ const sampling = {
   maxTokens: kind === 'confirmation' ? 500 : 6000,
   ...(thinkingEnv !== undefined ? { thinking: thinkingEnv as 'enabled' | 'disabled' } : {}),
 }
+const confirmationContext = ['请先完整展示草稿。']
 const maxRequests = maxRequestsFromEnv()
 const report: Record<string, unknown> = {
   status: 'not_run', kind,
@@ -54,7 +55,9 @@ const report: Record<string, unknown> = {
   },
   commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   fixtureSha256: hash(fixtureText), promptSha256: hash(readFileSync(join(root, promptFile), 'utf8')),
-  promptVersion: kind === 'confirmation' ? 'rf-confirmation-1088-v1' : REFLECTION_GUIDANCE_VERSION,
+  harnessSha256: hash(readFileSync(__filename, 'utf8')),
+  ...(kind === 'confirmation' ? { confirmationContext } : {}),
+  promptVersion: kind === 'confirmation' ? 'rf-confirmation-1088-v2' : REFLECTION_GUIDANCE_VERSION,
   provider: protocol, model: modelId ?? null, modelVersion: null, modelVersions: [],
   scenarioConstructionComplete: true,
   sampling, runs: [],
@@ -100,7 +103,7 @@ if (!apiKey || !modelId || !baseUrl) {
           sample.responseMetadata = response.response_metadata
           return response
         }))
-        const result = await classifier({ userText: item.user, previousUserMessages: ['请先完整展示草稿，暂不保存。'], action: {
+        const result = await classifier({ userText: item.user, previousUserMessages: confirmationContext, action: {
           displayId: 'synthetic-display', draftId: 'synthetic-draft', version: 1, bodyHash: 'a'.repeat(64), action: item.action,
           title: '验证遗漏', category: 'verification', evidenceCount: 1,
         } })
