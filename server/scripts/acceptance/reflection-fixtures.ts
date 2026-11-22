@@ -46,8 +46,7 @@ export async function createAnalysisFixture(input: AnalysisCase, options: { clas
   let history: ReturnType<typeof createHistoryRuntime> | undefined
   const dispose = async () => {
     await Promise.allSettled([reflection?.dispose(), history?.dispose()])
-    await prisma?.$disconnect()
-    rmSync(dir, { recursive: true, force: true })
+    try { await prisma?.$disconnect() } finally { rmSync(dir, { recursive: true, force: true }) }
   }
   try {
     const db = new Database(dbPath)

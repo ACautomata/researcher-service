@@ -115,7 +115,6 @@ async function analyze(raw: AnalysisCase, model: Awaited<ReturnType<typeof defau
     if (fixture.canary && JSON.stringify({ output, drafts, evidence }).includes(fixture.canary)) violations.push('secret_leak')
     return { output, drafts, evidence, sources, setup: item.setup, priorRecordIds: fixture.priorRecordIds, violations, sideEffects: { recordsWritten, baselineRecords: fixture.baselineRecords }, terminalState: svc.stateOf(current.id)?.state }
   } finally {
-    await svc?.dispose()
-    await fixture.dispose()
+    try { await svc?.dispose() } finally { await fixture.dispose() }
   }
 }

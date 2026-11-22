@@ -56,7 +56,7 @@ export async function purgeReflectionToolInputs(tx: Tx, ownerId: string, draftId
   const ids = new Set(draftIds)
   const calls = new Map<string, Set<string>>()
   const links = await tx.reflectionToolInputLink.findMany({ where: { ownerId, draftId: { in: draftIds } } })
-  let { checkpoints, writes, messages } = await findCandidateCopies(tx, ownerId, draftIds, links.map(link => link.toolCallId))
+  let { checkpoints, writes, messages } = await findCandidateCopies(tx, ownerId, draftIds, links.map(link => ({ threadId: link.threadId, toolCallId: link.toolCallId })))
   for (const link of links) {
     const known = calls.get(link.threadId) ?? new Set<string>()
     known.add(link.toolCallId); calls.set(link.threadId, known)
@@ -69,7 +69,7 @@ export async function purgeReflectionToolInputs(tx: Tx, ownerId: string, draftId
   for (const row of [...checkpoints, ...writes]) collect(row.threadId, decode(row.type, row.blob))
   for (const row of messages) collect(row.sessionId, resultValue(row.attachmentsJson))
   // 旧结果先补出调用身份，再定向读取首结果之前的快照，不能遗漏无draftId的创建参数。
-  const expanded = await findCandidateCopies(tx, ownerId, draftIds, [...new Set([...calls.values()].flatMap(set => [...set]))])
+  const expanded = await findCandidateCopies(tx, ownerId, draftIds, [...calls].flatMap(([threadId, ids]) => [...ids].map(toolCallId => ({ threadId, toolCallId }))))
   checkpoints = expanded.checkpoints; writes = expanded.writes; messages = expanded.messages
   for (const [threadId, toolIds] of calls) for (const toolCallId of toolIds) {
     await tx.reflectionToolInputLink.upsert({ where: { threadId_toolCallId: { threadId, toolCallId } }, create: { ownerId, threadId, toolCallId, redacted: true }, update: { redacted: true } })
@@ -159,10 +159,10 @@ export function withReflectionInputFence<T>(prisma: PrismaClient, type: string, 
 }
 
 /** 在 SQLite 预过滤身份及具体引用，只物化/解码目标副本；旧数据无需全用户装入内存。 */
-async function findCandidateCopies(tx: Tx, ownerId: string, draftIds: string[], toolCallIds: string[], threadId?: string) {
-  const needles = JSON.stringify([...draftIds, ...toolCallIds.flatMap(id => [`"id":${JSON.stringify(id)}`, `"toolCallId":${JSON.stringify(id)}`])])
+async function findCandidateCopies(tx: Tx, ownerId: string, draftIds: string[], toolCalls: { threadId: string; toolCallId: string }[], threadId?: string) {
+  const needles = JSON.stringify([...draftIds.map(text => ({ text, threadId: null })), ...toolCalls.flatMap(call => [`"id":${JSON.stringify(call.toolCallId)}`, `"toolCallId":${JSON.stringify(call.toolCallId)}`].map(text => ({ text, threadId: call.threadId })))])
   const owner = Prisma.sql`s."ownerId" = ${ownerId} AND (${threadId ?? null} IS NULL OR s."id" = ${threadId ?? null})`
-  const match = (payload: Prisma.Sql) => Prisma.sql`instr(${payload}, ${REFLECTION_TOOL_NAME}) > 0 AND EXISTS (SELECT 1 FROM json_each(${needles}) needle WHERE instr(${payload}, needle.value) > 0)`
+  const match = (payload: Prisma.Sql) => Prisma.sql`instr(${payload}, ${REFLECTION_TOOL_NAME}) > 0 AND EXISTS (SELECT 1 FROM json_each(${needles}) needle WHERE (json_extract(needle.value, '$.threadId') IS NULL OR json_extract(needle.value, '$.threadId') = s.id) AND instr(${payload}, json_extract(needle.value, '$.text')) > 0)`
   const checkpoints = await tx.$queryRaw<Checkpoint[]>(Prisma.sql`SELECT c.* FROM checkpoints c JOIN sessions s ON s.id = c."threadId" WHERE ${owner} AND ${match(Prisma.sql`CAST(c.blob AS TEXT)`)}`)
   const writes = await tx.$queryRaw<CheckpointWrite[]>(Prisma.sql`SELECT c.* FROM checkpoint_writes c JOIN sessions s ON s.id = c."threadId" WHERE ${owner} AND ${match(Prisma.sql`CAST(c.blob AS TEXT)`)}`)
   const messages = await tx.$queryRaw<SessionMessage[]>(Prisma.sql`SELECT c.* FROM session_messages c JOIN sessions s ON s.id = c."sessionId" WHERE ${owner} AND ${match(Prisma.sql`c."attachmentsJson"`)}`)
