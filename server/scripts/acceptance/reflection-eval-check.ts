@@ -52,13 +52,16 @@ if (!report.success) {
   if (report.data.kind !== kind || report.data.status !== 'reviewed') result.reasons.push('report_not_reviewed_or_wrong_kind')
   if (report.data.status === 'reviewed') {
     // 评分主体与授权变更必须显式记录：AI 代评不得冒用具名真人，也不得省略实际评分模型。
-    if (kind === 'confirmation') {
-      // 确认识别器的固定上下文与采样 harness 也是评测输入；缺指纹/被静默改动即拒绝。
-      const harnessHash = createHash('sha256').update(readFileSync(resolve(__dirname, 'reflection-model-eval.ts'))).digest('hex')
-      if (!report.data.harnessSha256) result.reasons.push('missing_harness_fingerprint')
-      else if (report.data.harnessSha256 !== harnessHash) result.reasons.push('harness_hash_mismatch')
-      if (!report.data.confirmationContext?.length) result.reasons.push('missing_confirmation_context')
-    }
+    // harness 也会随评测需求演进；报告记录运行时指纹，检查器要求它属于已登记版本，
+    // 并要求当前脚本指纹同样已登记，避免未登记的改动绕过复核。
+    const harnessHash = createHash('sha256').update(readFileSync(resolve(__dirname, 'reflection-model-eval.ts'))).digest('hex')
+    const manifest = z.object({ versions: z.array(z.object({ id: z.string(), sha256: z.string().length(64) })) })
+      .safeParse(JSON.parse(readFileSync(resolve(__dirname, '../../../docs/research/1088/model-eval/harness-versions.json'), 'utf8')))
+    if (!report.data.harnessSha256) result.reasons.push('missing_harness_fingerprint')
+    else if (!manifest.success) result.reasons.push('missing_harness_manifest')
+    else if (!manifest.data.versions.some(version => version.sha256 === report.data.harnessSha256)) result.reasons.push('unknown_harness_fingerprint')
+    if (!manifest.success || !manifest.data.versions.some(version => version.sha256 === harnessHash)) result.reasons.push('current_harness_unregistered')
+    if (kind === 'confirmation' && !report.data.confirmationContext?.length) result.reasons.push('missing_confirmation_context')
     if (!report.data.reviewer?.trim()) result.reasons.push('missing_reviewer')
     if (!report.data.reviewMethod) result.reasons.push('missing_review_method')
     if (!report.data.reviewerModelVersion?.trim()) result.reasons.push('missing_reviewer_model_version')

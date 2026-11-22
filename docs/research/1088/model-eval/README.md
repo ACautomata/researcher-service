@@ -58,6 +58,7 @@
 - 每条 reviewed 样本都含 reviewer、具体 rationale、safetyChecked、evidenceChecked；分析样本另含五维 0–2 分与 `dispositionMatched` 辅助指标。
 - 评分工具：`server/scripts/acceptance/reflection-review.ts`（只生成审阅材料/合并已作出的判断，不自动评分）。
 - 检查器输出：`gate-confirmation-v2.json`（当前通过）、`gate-confirmation.json`（v1 历史失败）、`gate-analysis-v3.json`（当前仅 7 个执行失败）、`gate-analysis.json`（v1 历史失败）；指纹/采样/评分覆盖与门禁 reasons 均来自 reviewed 报告。
+- harness 指纹清单：`harness-versions.json`。报告记录运行时 `harnessSha256`，检查器要求它属于已登记版本，且当前脚本指纹也已登记；harness 演进时须登记新版本，不能改写旧报告指纹。
 
 ## 失败史与修复
 
