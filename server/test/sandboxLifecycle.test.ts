@@ -127,6 +127,7 @@ describe('闲置自动 stop（story 58：30 分钟，文件保留）', () => {
   it('未知沙箱（控制面重启后 daemon 残留 running）→ 以服务启动时刻为闲置基线（grace）', async () => {
     const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
     // daemon 上已有沙箱（非本进程 ensure——模拟重启前残留）
+    await runtime.createNetwork('cold0001')
     await runtime.createSandbox({ sessionId: 'cold0001', image: 'busybox:1.36', limits: SANDBOX_LIMITS })
     await runtime.startSandbox('cold0001')
     clock.advance(500)
@@ -230,5 +231,102 @@ describe('fork 沙箱（#781 · #768 D7：源字面复制 / 源删空起步 / �
     runtime.failForkFor.add(TARGET)
     await expect(lifecycle.forkSandbox(SESSION, TARGET)).rejects.toThrow(/fork failure/)
     expect(runtime.containers.has(TARGET)).toBe(false)
+  })
+})
+
+describe('独立网络地址池回收（生产事故：每沙箱占一整个 /16|/20，daemon 默认池耗尽）', () => {
+  // 事故面：闲置只 stop 不删网络 → 22 个已停沙箱占满默认地址池 → 新会话 createNetwork 报
+  // "could not find an available, non-overlapping IPv4 address pool among the defaults"。
+  // 回收的另一半约束：网络可删 ≠ 可直接删——stopped 复启必须先重建，否则改报 network not found。
+
+  it('闲置 stop 同时释放独立网络；容器保留（文件不丢）', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    clock.advance(1500)
+    expect(await lifecycle.sweepIdle()).toEqual([SESSION])
+    expect(runtime.networks.has(SESSION)).toBe(false)
+    expect(runtime.containers.has(SESSION)).toBe(true) // stop ≠ remove：可写层 /lab 保留
+  })
+
+  it('回收后 ensure 复启：先重建网络再 start，容器不重建（文件保留语义不回归）', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    const first = (await lifecycle.ensure(SESSION)).containerId
+    clock.advance(1500)
+    await lifecycle.sweepIdle()
+    // 旧实现此处抛 network not found（fake 镜像 daemon start 语义）
+    const info = await lifecycle.ensure(SESSION)
+    expect(info.containerId).toBe(first)
+    expect(info.running).toBe(true)
+    expect(runtime.networks.has(SESSION)).toBe(true)
+  })
+
+  it('存量已停沙箱（部署前闲置残留 / OOM exited）→ sweep 回收其网络，不重复 stop', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    await runtime.stopSandbox(SESSION) // 模拟部署前已 stop、网络仍占池
+    clock.advance(5000)
+    runtime.calls.length = 0
+    expect(await lifecycle.sweepIdle()).toEqual([])
+    expect(runtime.calls.filter((c) => c.kind === 'stopSandbox')).toHaveLength(0)
+    expect(runtime.networks.has(SESSION)).toBe(false)
+  })
+
+  it('已回收沙箱不被每轮重复 DELETE；复启后可再次回收', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    clock.advance(1500)
+    await lifecycle.sweepIdle()
+    runtime.calls.length = 0
+    clock.advance(1500)
+    await lifecycle.sweepIdle()
+    expect(runtime.calls.filter((c) => c.kind === 'removeNetwork')).toHaveLength(0)
+    await lifecycle.ensure(SESSION) // 复启重建 → 回收标记须失效
+    clock.advance(1500)
+    await lifecycle.sweepIdle()
+    expect(runtime.networks.has(SESSION)).toBe(false)
+  })
+
+  it('单沙箱删网失败不阻断本轮其余回收，下轮重试', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    const OTHER = 'csession0002'
+    await lifecycle.ensure(SESSION)
+    await lifecycle.ensure(OTHER)
+    clock.advance(1500)
+    runtime.failRemoveNetworkFor.add(SESSION)
+    expect((await lifecycle.sweepIdle()).sort()).toEqual([SESSION, OTHER].sort())
+    expect(runtime.networks.has(SESSION)).toBe(true) // 失败：保留待重试，不吞成成功
+    expect(runtime.networks.has(OTHER)).toBe(false)
+    runtime.failRemoveNetworkFor.delete(SESSION)
+    await lifecycle.sweepIdle()
+    expect(runtime.networks.has(SESSION)).toBe(false)
+  })
+
+  it('复启与 sweep 并发：终态 running 且网络在（不被陈旧快照删网）', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    clock.advance(1500)
+    await lifecycle.sweepIdle() // 停 + 删网
+    const [info] = await Promise.all([lifecycle.ensure(SESSION), lifecycle.sweepIdle()])
+    expect(info.running).toBe(true)
+    expect(runtime.networks.has(SESSION)).toBe(true)
+    expect(runtime.containers.get(SESSION)!.info.running).toBe(true)
+  })
+
+  it('sweep 期间被 remove 的沙箱：不再报网络操作，标记作废', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    clock.advance(1500)
+    await lifecycle.sweepIdle()
+    await lifecycle.remove(SESSION)
+    expect(await lifecycle.sweepIdle()).toEqual([]) // list 已不含它 → 完全无处置
+    expect(runtime.networks.has(SESSION)).toBe(false)
+  })
+
+  it('running 且未闲置的沙箱：网络不动', async () => {
+    const { clock, runtime, lifecycle } = makeLifecycle({ idleMs: 1000 })
+    await lifecycle.ensure(SESSION)
+    clock.advance(500)
+    expect(await lifecycle.sweepIdle()).toEqual([])
+    expect(runtime.networks.has(SESSION)).toBe(true)
   })
 })

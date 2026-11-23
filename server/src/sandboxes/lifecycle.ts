@@ -38,6 +38,9 @@ export class SandboxLifecycle {
   private readonly serializer = new NameSerializer()
   // sessionId → 最后活动时刻（epoch ms）
   private readonly activity = new Map<string, number>()
+  // 已确认回收独立网络的沙箱：稳态下不再对其重复 DELETE（历史沙箱随会话数增长，每轮全量
+  // DELETE 会把 sweeper 变成对 daemon 的无效压力）。ensure/fork 重建网络时清除标记。
+  private readonly networkReleased = new Set<string>()
   // 服务启动时刻（未知沙箱的闲置基线，见类注释）
   private readonly bootMs: number
   private sweeper: NodeJS.Timeout | null = null
@@ -62,6 +65,14 @@ export class SandboxLifecycle {
     this.activity.set(sessionId, this.now())
   }
 
+  // 确保独立网络存在（createNetwork 幂等：已存在复用），并作废「已回收」标记。
+  // 复启必须先走这里：闲置回收会删掉网络，而容器 HostConfig.NetworkMode 仍指着它——
+  // 直接 start 会被 daemon 以 network not found 拒收（文件还在，但会话起不来）。
+  private async ensureNetwork(sessionId: string): Promise<void> {
+    await this.runtime.createNetwork(sessionId)
+    this.networkReleased.delete(sessionId)
+  }
+
   // 惰性创建 + 确保运行（幂等）：running → 原样返回；stopped → start（文件保留语义：可写层
   // 跨 stop/start 存续）；不存在 → create（网络 + 容器 + /lab 预置）→ start。全部路径刷新活动。
   // 返回值恒为 runtime 实况快照（stopped 复启分支 start 后重查——返回陈旧 running:false 会
@@ -71,6 +82,7 @@ export class SandboxLifecycle {
       const existing = await this.runtime.getSandbox(sessionId)
       if (existing !== null) {
         if (!existing.running) {
+          await this.ensureNetwork(sessionId) // 闲置回收已删网 → 复启前重建（幂等）
           await this.runtime.startSandbox(sessionId)
           const fresh = await this.runtime.getSandbox(sessionId)
           this.touch(sessionId)
@@ -80,7 +92,7 @@ export class SandboxLifecycle {
         return existing
       }
       // 网络先行（容器建在网络上）；createSandbox 只做容器原语（create + /lab 预置）
-      await this.runtime.createNetwork(sessionId)
+      await this.ensureNetwork(sessionId)
       const id = await this.runtime.createSandbox({
         sessionId,
         image: this.opts.image,
@@ -111,6 +123,7 @@ export class SandboxLifecycle {
       await this.runtime.removeSandbox(sessionId)
       await this.runtime.removeNetwork(sessionId)
       this.activity.delete(sessionId)
+      this.networkReleased.delete(sessionId)
       return 'removed'
     })
   }
@@ -121,7 +134,7 @@ export class SandboxLifecycle {
   // 与 ensure/remove 同 serializer——并发 fork 只落一次）。返回值 = 复制结果供调用方落系统消息。
   forkSandbox(sourceSessionId: string, newSessionId: string): Promise<'copied' | 'source-missing'> {
     return this.serializer.enqueue(newSessionId, async () => {
-      await this.runtime.createNetwork(newSessionId)
+      await this.ensureNetwork(newSessionId)
       const spec = {
         sessionId: newSessionId,
         sourceSessionId,
@@ -144,19 +157,53 @@ export class SandboxLifecycle {
   // 闲置回收扫描：对 daemon 上仍 running 的沙箱，按「最后活动（未知 → 服务启动时刻）+ 阈值」
   // 判闲置并 stop（文件保留）。返回被 stop 的 sessionId 列表（观测/测试面）。daemon 不可达 →
   // 抛错由 sweeper 吞（下轮重试），不炸进程。
+  //
+  // stop 之外还回收独立网络：每沙箱独占一个 bridge 网段，而 daemon 默认地址池只有 31 段
+  // （172.17–172.31.0.0/16 + 192.168.0–240.0/20；与宿主路由重叠的段不可用）。只 stop 不删网
+  // 会让每个闲置会话永久占一段，直至 createNetwork 报「could not find an available,
+  //  non-overlapping IPv4 address pool among the defaults」、全面无法开新会话。删网不动容器
+  // 可写层，文件保留语义不变；复启由 ensure 重建网络。已停沙箱（含部署前残留、OOM exited）
+  // 同样回收——部署后首轮 sweep 即清掉历史泄漏，无需手工清网。
+  //
+  // 每个沙箱的处置都走 per-session 串行器（与 ensure/remove/fork 同一把锁），且入队后重读
+  // 实况：list 快照会陈旧——复启与 sweep 并发时，若按「快照里它是 stopped」直接删网，就会把
+  // ensure 刚重建的网络再删掉，复启又落回 network not found。重读后 running → 本轮不动它。
   async sweepIdle(): Promise<string[]> {
     const sandboxes = await this.runtime.listSandboxes()
     const now = this.now()
     const stopped: string[] = []
     for (const s of sandboxes) {
-      if (!s.running) continue // 已停（含 OOM 后 exited）：无 stop 语义
-      const last = this.activity.get(s.sessionId) ?? this.bootMs
-      if (now - last >= this.idleMs()) {
-        await this.runtime.stopSandbox(s.sessionId)
-        stopped.push(s.sessionId)
-      }
+      await this.serializer.enqueue(s.sessionId, async () => {
+        const fresh = await this.runtime.getSandbox(s.sessionId)
+        if (fresh === null) {
+          // 已被 remove（容器 + 网络同清）：只作废本地标记
+          this.networkReleased.delete(s.sessionId)
+          return
+        }
+        if (fresh.running) {
+          const last = this.activity.get(s.sessionId) ?? this.bootMs
+          if (now - last < this.idleMs()) return // 未闲置：容器与网络都不动
+          await this.runtime.stopSandbox(s.sessionId)
+          stopped.push(s.sessionId)
+        } else if (this.networkReleased.has(s.sessionId)) {
+          return // 已停且网络已回收：无重复 DELETE
+        }
+        await this.releaseNetwork(s.sessionId)
+      })
     }
     return stopped
+  }
+
+  // 回收沙箱独立网络（尽力而为）：单个失败只告警、不中断本轮其余沙箱回收，且不记回收标记，
+  // 下一轮 sweep 重试。stop 已成功，删网失败不应让整轮扫描报废（daemon 抖动/残留 endpoint）。
+  private async releaseNetwork(sessionId: string): Promise<void> {
+    try {
+      await this.runtime.removeNetwork(sessionId)
+      this.networkReleased.add(sessionId)
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[sandboxes] idle network release failed: session=${sessionId} ${(e as Error).message}`)
+    }
   }
 
   // 启动周期 sweeper（生产装配；unref 不阻进程退出）。返回停止句柄。

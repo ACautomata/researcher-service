@@ -4,6 +4,7 @@
 // 「沙箱对容器列表隐身」类断言共享同一判定源。
 
 import type { SandboxInfo, SandboxRuntime, SandboxSpec, SandboxForkSpec } from '../src/sandboxes/runtime'
+import { sandboxNetworkName } from '../src/sandboxes/runtime'
 
 export interface FakeSandboxRecord {
   info: SandboxInfo
@@ -27,6 +28,8 @@ export class FakeSandboxRuntime implements SandboxRuntime {
   readonly forkedFrom = new Map<string, string>()
   // 故障注入：对指定 sessionId 的 createSandboxFromSource 抛错
   failForkFor = new Set<string>()
+  // 故障注入：对指定 sessionId 的 removeNetwork 抛错（测回收容错与下轮重试）
+  failRemoveNetworkFor = new Set<string>()
 
   async createNetwork(sessionId: string): Promise<void> {
     this.calls.push({ kind: 'createNetwork', sessionId })
@@ -35,6 +38,7 @@ export class FakeSandboxRuntime implements SandboxRuntime {
 
   async removeNetwork(sessionId: string): Promise<void> {
     this.calls.push({ kind: 'removeNetwork', sessionId })
+    if (this.failRemoveNetworkFor.has(sessionId)) throw new Error(`simulated network remove failure: ${sessionId}`)
     this.networks.delete(sessionId)
     this.removedNetworks.push(sessionId)
   }
@@ -91,6 +95,9 @@ export class FakeSandboxRuntime implements SandboxRuntime {
     this.calls.push({ kind: 'startSandbox', sessionId })
     const rec = this.containers.get(sessionId)
     if (!rec) return
+    // 镜像真 daemon：HostConfig.NetworkMode 指向的独立网络不存在时 start 失败（network not found）。
+    // 闲置回收会释放网络，复启必须先重建——缺这层模拟会把「复启不重建网络」的缺陷掩蔽成通过。
+    if (!this.networks.has(sessionId)) throw new Error(`network not found: ${sandboxNetworkName(sessionId)}`)
     rec.started = true
     rec.info = { ...rec.info, running: true, status: 'running' }
   }
